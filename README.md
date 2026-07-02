@@ -4,13 +4,13 @@ Smart Cover Connect backend API written in Go.
 
 ## Target runtime
 
-Production backend runs on a VPS as a native Go binary managed by `systemd`, behind `nginx` with HTTPS.
+Production backend runs on a VPS as a Docker container pulled from GitHub Container Registry, behind `nginx` with HTTPS.
 
 ```text
-Vercel frontend -> https://api.<domain>/api/v1 -> nginx -> scc-backend systemd service -> Neon Postgres / Cloudflare R2
+Vercel frontend -> https://api.<domain>/api/v1 -> nginx -> Docker scc-backend container -> Neon Postgres / Cloudflare R2
 ```
 
-Docker is intentionally not part of the current dev/deploy flow. Re-add a Dockerfile later only if the VPS deployment moves to containers.
+Docker is the production packaging format for the VPS. Local development can still run native Go for speed.
 
 ## Local development
 

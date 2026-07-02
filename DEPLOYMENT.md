@@ -1,13 +1,22 @@
 # VPS Backend Deployment
 
-SCC backend production target: small Ubuntu VPS running a native Go binary with `systemd` and `nginx`.
+SCC backend production target: Ubuntu VPS running the latest Docker image from GitHub Container Registry (GHCR), behind `nginx` with HTTPS.
 
-## Recommended VPS for first month
+## Runtime architecture
+
+```text
+Vercel frontend -> https://api.<domain>/api/v1 -> nginx -> Docker container ghcr.io/<owner>/scc-backend:latest -> Neon Postgres / Cloudflare R2
+```
+
+The app container is stateless. Database migrations run in GitHub Actions before the image is deployed.
+
+## Recommended VPS
 
 - Ubuntu 24.04 LTS
 - 1 vCPU minimum
 - 2 GB RAM recommended
 - 20-40 GB disk
+- Docker installed
 - No local Postgres required; use Neon
 - No local object storage required; use Cloudflare R2
 
@@ -15,94 +24,79 @@ SCC backend production target: small Ubuntu VPS running a native Go binary with 
 
 ```bash
 sudo apt update
-sudo apt install -y nginx certbot python3-certbot-nginx ca-certificates curl git
+sudo apt install -y nginx certbot python3-certbot-nginx ca-certificates curl git ufw
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER"
 ```
 
-Install Go on the server or build locally/CI and upload the binary. For simple first deploy, build on the VPS.
+Log out/in after adding the user to the docker group.
 
-## App directory
+## App directory and env file
 
 ```bash
-sudo useradd --system --home /opt/scc-backend --shell /usr/sbin/nologin scc || true
 sudo mkdir -p /opt/scc-backend
-sudo chown -R "$USER":scc /opt/scc-backend
+sudo touch /opt/scc-backend/.env
+sudo chown -R "$USER":"$USER" /opt/scc-backend
+chmod 600 /opt/scc-backend/.env
 ```
 
-## Build
-
-```bash
-git clone https://github.com/Armboy122/scc-backend.git /opt/scc-backend/src
-cd /opt/scc-backend/src
-go test ./...
-go build -o /opt/scc-backend/scc-api ./cmd/api
-sudo chown scc:scc /opt/scc-backend/scc-api
-```
-
-## Environment file
-
-Create `/etc/scc-backend.env`:
+Create `/opt/scc-backend/.env`:
 
 ```env
 DATABASE_URL=postgresql://...
-JWT_SECRET=change-me
+JWT_SECRET=<long-random-secret>
 JWT_ACCESS_TTL=15m
 JWT_REFRESH_TTL=720h
 
 MINIO_ENDPOINT=<cloudflare-account-id>.r2.cloudflarestorage.com
-MINIO_ACCESS_KEY=
-MINIO_SECRET_KEY=
-MINIO_BUCKET=
-MINIO_PUBLIC_URL=https://<public-r2-domain-or-worker>
+MINIO_ACCESS_KEY=<r2-access-key-id>
+MINIO_SECRET_KEY=<r2-secret-access-key>
+MINIO_BUCKET=scc
+MINIO_PUBLIC_URL=https://<public-r2-domain>
 MINIO_USE_SSL=true
 
 CORS_ORIGINS=https://<vercel-domain>
 PORT=8080
 ENV=production
+AUTO_MIGRATE=false
 SEED_DATA=false
 ```
 
-Secure it:
+## GitHub Actions secrets
 
-```bash
-sudo chown root:scc /etc/scc-backend.env
-sudo chmod 640 /etc/scc-backend.env
+Set these in the backend repository:
+
+```text
+DATABASE_URL        Neon production database URL for migrations
+VPS_HOST            VPS public IP or DNS name
+VPS_USER            SSH user with docker access
+VPS_SSH_KEY         Private SSH deploy key
+VPS_PORT            Optional; defaults to 22 in workflow expressions
+GHCR_USERNAME       Optional if GHCR package is public; required for private pull on VPS
+GHCR_TOKEN          Optional if GHCR package is public; required for private pull on VPS
 ```
 
-## systemd service
+Recommended: create a GitHub PAT for `GHCR_TOKEN` with `read:packages` only and use the GitHub username as `GHCR_USERNAME`.
 
-Create `/etc/systemd/system/scc-backend.service`:
+## Deployment flow
 
-```ini
-[Unit]
-Description=Smart Cover Connect Backend
-After=network-online.target
-Wants=network-online.target
+On push to `main`, `.github/workflows/deploy.yml` will:
 
-[Service]
-User=scc
-Group=scc
-WorkingDirectory=/opt/scc-backend
-EnvironmentFile=/etc/scc-backend.env
-ExecStart=/opt/scc-backend/scc-api
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/scc-backend
+1. Run `go test ./...`.
+2. Run Goose migrations from `db/migrations` against `DATABASE_URL`.
+3. Build and push Docker image to GHCR as:
+   - `ghcr.io/<owner>/scc-backend:latest`
+   - `ghcr.io/<owner>/scc-backend:<commit-sha>`
+4. SSH into the VPS.
+5. Pull `latest`, replace the running container, and health check `/api/v1/health`.
 
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable:
+Manual VPS command equivalent:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now scc-backend
-sudo systemctl status scc-backend --no-pager
-journalctl -u scc-backend -f
+GHCR_IMAGE=ghcr.io/<owner>/scc-backend:latest \
+GHCR_USERNAME=<github-username> \
+GHCR_TOKEN=<github-token-with-read-packages> \
+/tmp/deploy-scc-backend.sh
 ```
 
 ## nginx reverse proxy

@@ -12,6 +12,7 @@ type Config struct {
 	Port        string
 	Env         string
 	SeedData    bool
+	AutoMigrate bool
 
 	JWTSecret     string
 	JWTAccessTTL  time.Duration
@@ -34,6 +35,7 @@ func Load() *Config {
 		Port:           getEnv("PORT", "8080"),
 		Env:            getEnv("ENV", "development"),
 		SeedData:       getBoolEnv("SEED_DATA", false),
+		AutoMigrate:    getBoolEnv("AUTO_MIGRATE", getEnv("ENV", "development") != "production"),
 		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-production"),
 		JWTAccessTTL:   getDurationEnv("JWT_ACCESS_TTL", 15*time.Minute),
 		JWTRefreshTTL:  getDurationEnv("JWT_REFRESH_TTL", 720*time.Hour),

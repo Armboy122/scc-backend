@@ -26,7 +26,7 @@ func main() {
 	cfg := config.Load()
 
 	// Database
-	db, err := persistence.InitDB(cfg.DatabaseURL, cfg.SeedData)
+	db, err := persistence.InitDB(cfg.DatabaseURL, cfg.SeedData, cfg.AutoMigrate)
 	if err != nil {
 		log.Fatalf("init db: %v", err)
 	}

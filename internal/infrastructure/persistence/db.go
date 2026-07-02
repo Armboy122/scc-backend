@@ -13,8 +13,8 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// InitDB opens a GORM connection, runs AutoMigrate, and optionally seeds data.
-func InitDB(dsn string, seedData bool) (*gorm.DB, error) {
+// InitDB opens a GORM connection and optionally runs AutoMigrate/seed data.
+func InitDB(dsn string, seedData bool, autoMigrate bool) (*gorm.DB, error) {
 	gormLogger := logger.New(
 		log.New(os.Stdout, "\r\n", log.LstdFlags),
 		logger.Config{
@@ -40,8 +40,10 @@ func InitDB(dsn string, seedData bool) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 
-	if err := migrate(db); err != nil {
-		return nil, fmt.Errorf("migrate: %w", err)
+	if autoMigrate {
+		if err := migrate(db); err != nil {
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
 	}
 
 	if seedData {
