@@ -108,8 +108,8 @@ jobs:
       - name: Deploy latest image on VPS
         env:
           GHCR_IMAGE: ${{ needs.build-and-push.outputs.image }}
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
           ssh -p "${{ secrets.VPS_PORT || 22 }}" -i ~/.ssh/scc_deploy_key "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
             "chmod +x /tmp/deploy-scc-backend.sh && GHCR_IMAGE='${GHCR_IMAGE}' GHCR_USERNAME='${GHCR_USERNAME}' GHCR_TOKEN='${GHCR_TOKEN}' /tmp/deploy-scc-backend.sh"
