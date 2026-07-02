@@ -31,7 +31,7 @@ type Config struct {
 // Load reads environment variables and returns a Config with sane defaults.
 func Load() *Config {
 	return &Config{
-		DatabaseURL:    getEnv("DATABASE_URL", "postgres://smartcover:smartcover@postgres:5432/smartcover?sslmode=disable"),
+		DatabaseURL:    getEnv("DATABASE_URL", "postgres://smartcover:smartcover@scc-postgres:5432/smartcover?sslmode=disable"),
 		Port:           getEnv("PORT", "8080"),
 		Env:            getEnv("ENV", "development"),
 		SeedData:       getBoolEnv("SEED_DATA", false),
@@ -39,10 +39,10 @@ func Load() *Config {
 		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-production"),
 		JWTAccessTTL:   getDurationEnv("JWT_ACCESS_TTL", 15*time.Minute),
 		JWTRefreshTTL:  getDurationEnv("JWT_REFRESH_TTL", 720*time.Hour),
-		MinioEndpoint:  getEnv("MINIO_ENDPOINT", "minio:9000"),
+		MinioEndpoint:  getEnv("MINIO_ENDPOINT", "scc-minio:9000"),
 		MinioAccessKey: getEnv("MINIO_ACCESS_KEY", "minioadmin"),
 		MinioSecretKey: getEnv("MINIO_SECRET_KEY", "minioadmin"),
-		MinioBucket:    getEnv("MINIO_BUCKET", "covers"),
+		MinioBucket:    getEnv("MINIO_BUCKET", "scc"),
 		MinioPublicURL: getEnv("MINIO_PUBLIC_URL", "http://localhost:9000"),
 		MinioUseSSL:    getBoolEnv("MINIO_USE_SSL", false),
 		CORSOrigins:    getEnv("CORS_ORIGINS", "http://localhost:3000"),

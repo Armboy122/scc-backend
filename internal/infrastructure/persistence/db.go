@@ -79,8 +79,8 @@ func seed(db *gorm.DB) error {
 
 	log.Println("[seed] starting seed data...")
 
-	// Initial master data mirrors Neon jumper.public.work_centers/departments.
-	// Runtime remains local Docker Postgres; Neon is only the reference source.
+	// Initial master data mirrors the legacy work center / department reference data.
+	// Runtime source of truth is the SCC PostgreSQL database on the VPS.
 	workCenters := []struct {
 		ID   int
 		Name string

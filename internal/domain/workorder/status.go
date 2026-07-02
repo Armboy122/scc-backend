@@ -6,13 +6,13 @@ import "errors"
 type WorkOrderStatus string
 
 const (
-	StatusScheduled   WorkOrderStatus = "SCHEDULED"
-	StatusInstalling  WorkOrderStatus = "INSTALLING"
-	StatusActive      WorkOrderStatus = "ACTIVE"
-	StatusRemovalDue  WorkOrderStatus = "REMOVAL_DUE"
-	StatusRemoving    WorkOrderStatus = "REMOVING"
-	StatusCompleted   WorkOrderStatus = "COMPLETED"
-	StatusCancelled   WorkOrderStatus = "CANCELLED"
+	StatusScheduled  WorkOrderStatus = "SCHEDULED"
+	StatusInstalling WorkOrderStatus = "INSTALLING"
+	StatusActive     WorkOrderStatus = "ACTIVE"
+	StatusRemovalDue WorkOrderStatus = "REMOVAL_DUE"
+	StatusRemoving   WorkOrderStatus = "REMOVING"
+	StatusCompleted  WorkOrderStatus = "COMPLETED"
+	StatusCancelled  WorkOrderStatus = "CANCELLED"
 )
 
 // WorkOrderType represents the type of work order.

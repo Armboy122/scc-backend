@@ -6,9 +6,9 @@ import "errors"
 type CoverStatus string
 
 const (
-	StatusInStock  CoverStatus = "IN_STOCK"
+	StatusInStock   CoverStatus = "IN_STOCK"
 	StatusInstalled CoverStatus = "INSTALLED"
-	StatusRetired  CoverStatus = "RETIRED"
+	StatusRetired   CoverStatus = "RETIRED"
 )
 
 // IsValid returns true if the status is a known value.

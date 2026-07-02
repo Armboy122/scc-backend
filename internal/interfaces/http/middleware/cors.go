@@ -19,6 +19,12 @@ func CORS(allowedOrigins string) func(http.Handler) http.Handler {
 			if _, ok := originSet[origin]; ok {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
+			} else if _, wildcard := originSet["*"]; wildcard && origin != "" {
+				// Echo the request origin instead of returning "*" so credentialed
+				// requests keep working during VPS bootstrap before the final Vercel
+				// domain is known.
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")

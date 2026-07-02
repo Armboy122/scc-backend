@@ -32,25 +32,9 @@ jobs:
       - name: Test
         run: go test ./...
 
-  migrate:
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install goose
-        run: go install github.com/pressly/goose/v3/cmd/goose@latest
-
-      - name: Run database migrations
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: goose -dir db/migrations postgres "$DATABASE_URL" up
-
   build-and-push:
     runs-on: ubuntu-latest
-    needs: migrate
+    needs: test
     outputs:
       image: ${{ steps.meta.outputs.image }}
     steps:
@@ -111,5 +95,20 @@ jobs:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ github.token }}
         run: |
+          local_env="$(mktemp)"
+          trap 'rm -f "$local_env"' EXIT
+
+          env_quote() {
+            printf "%s='%s'\n" "$1" "$(printf '%s' "$2" | sed "s/'/'\\''/g")"
+          }
+
+          {
+            env_quote GHCR_IMAGE "$GHCR_IMAGE"
+            env_quote GHCR_USERNAME "$GHCR_USERNAME"
+            env_quote GHCR_TOKEN "$GHCR_TOKEN"
+          } > "$local_env"
+          chmod 600 "$local_env"
+
+          scp -P "${{ secrets.VPS_PORT || 22 }}" -i ~/.ssh/scc_deploy_key "$local_env" "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/scc-backend-deploy.env"
           ssh -p "${{ secrets.VPS_PORT || 22 }}" -i ~/.ssh/scc_deploy_key "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "chmod +x /tmp/deploy-scc-backend.sh && GHCR_IMAGE='${GHCR_IMAGE}' GHCR_USERNAME='${GHCR_USERNAME}' GHCR_TOKEN='${GHCR_TOKEN}' /tmp/deploy-scc-backend.sh"
+            "bash -lc 'set -euo pipefail; deploy_env=/tmp/scc-backend-deploy.env; trap '\''rm -f \"\$deploy_env\"'\'' EXIT; chmod 600 \"\$deploy_env\"; set -a; source \"\$deploy_env\"; set +a; chmod +x /tmp/deploy-scc-backend.sh; /tmp/deploy-scc-backend.sh'"

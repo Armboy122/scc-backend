@@ -4,13 +4,28 @@ Smart Cover Connect backend API written in Go.
 
 ## Target runtime
 
-Production backend runs on a VPS as a Docker container pulled from GitHub Container Registry, behind `nginx` with HTTPS.
+Production backend runs on the VPS as Docker containers behind **Caddy** with automatic HTTPS.
 
 ```text
-Vercel frontend -> https://api.<domain>/api/v1 -> nginx -> Docker scc-backend container -> Neon Postgres / Cloudflare R2
+Vercel frontend
+  -> https://api.<vps-ip>.sslip.io/api/v1 or https://api.<real-domain>/api/v1
+  -> Caddy container
+  -> Docker scc-backend container
+  -> Docker PostgreSQL container on the same VPS
+  -> Docker MinIO container on the same VPS
 ```
 
-Docker is the production packaging format for the VPS. Local development can still run native Go for speed.
+Current stack decision:
+
+| Layer | Target |
+|---|---|
+| Frontend | Vercel |
+| Backend API | VPS via Docker/GHCR, reachable through Caddy HTTPS |
+| Database | PostgreSQL container on the VPS |
+| Image/object storage | MinIO container on the VPS, published through Caddy HTTPS |
+| Temporary hostnames | `api.<vps-ip>.sslip.io`, `storage.<vps-ip>.sslip.io` |
+
+NeonDB and Cloudflare R2 are not part of the current runtime stack.
 
 ## Local development
 
@@ -20,7 +35,7 @@ Docker is the production packaging format for the VPS. Local development can sti
 cp .env.example .env.local
 ```
 
-2. Fill `.env.local` with Neon dev DB and R2 dev bucket values.
+2. Fill `.env.local` with a local or VPS PostgreSQL DSN and MinIO values. Keep real secrets local only.
 
 3. Export env and run API:
 
@@ -47,4 +62,4 @@ go test ./...
 
 See `.env.example`.
 
-Current storage env names use `MINIO_*` because the code uses the MinIO S3-compatible client. For Cloudflare R2, set these to R2 values.
+Production VPS env lives at `/opt/scc-backend/.env`. The deploy script uses that file to run PostgreSQL, MinIO, Caddy, and the backend container on a shared Docker network.

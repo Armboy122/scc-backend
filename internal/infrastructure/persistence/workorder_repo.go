@@ -70,7 +70,7 @@ func (r *GormWorkOrderRepo) List(ctx context.Context, filter workorder.WorkOrder
 
 	page, limit := normalise(filter.Page, filter.Limit)
 	var models []WorkOrderModel
-	err := q.Offset((page-1)*limit).Limit(limit).Order("created_at DESC").Find(&models).Error
+	err := q.Offset((page - 1) * limit).Limit(limit).Order("created_at DESC").Find(&models).Error
 	if err != nil {
 		return nil, 0, err
 	}
