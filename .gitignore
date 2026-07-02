@@ -1,0 +1,24 @@
+# OS
+.DS_Store
+
+# Go
+bin/
+tmp/
+*.exe
+*.test
+*.out
+coverage.out
+.coverage/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+env.local
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
