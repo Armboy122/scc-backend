@@ -312,13 +312,8 @@ func (h *WorkOrderHandler) SubmitInstall(w http.ResponseWriter, r *http.Request)
 	if !h.canAccessWorkOrder(w, r, id) {
 		return
 	}
-	var req struct {
-		GpsLat *float64 `json:"gpsLat"`
-		GpsLng *float64 `json:"gpsLng"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	if err := h.svc.SubmitInstall(r.Context(), id, req.GpsLat, req.GpsLng); err != nil {
+	if err := h.svc.SubmitInstall(r.Context(), id); err != nil {
 		h.handleWOError(w, err)
 		return
 	}

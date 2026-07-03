@@ -255,7 +255,7 @@ func (s *Service) UnscanInstall(ctx context.Context, woID, coverID string) error
 
 // SubmitInstall transitions SCHEDULED → ACTIVE atomically:
 // marks all draft installations as installed, sets cover status to INSTALLED.
-func (s *Service) SubmitInstall(ctx context.Context, woID string, gpsLat, gpsLng *float64) error {
+func (s *Service) SubmitInstall(ctx context.Context, woID string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		// Re-create scoped repos using transaction DB
 		txWORepo := newTxWORepo(tx)
@@ -306,12 +306,6 @@ func (s *Service) SubmitInstall(ctx context.Context, woID string, gpsLat, gpsLng
 		}
 
 		wo.Status = woDomain.StatusActive
-		if gpsLat != nil {
-			wo.GpsLat = gpsLat
-		}
-		if gpsLng != nil {
-			wo.GpsLng = gpsLng
-		}
 		wo.UpdatedAt = now
 		return txWORepo.Update(ctx, wo)
 	})
