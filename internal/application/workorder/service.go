@@ -163,7 +163,8 @@ func (s *Service) List(ctx context.Context, filter woDomain.WorkOrderFilter) ([]
 	return s.woRepo.List(ctx, filter)
 }
 
-// Start transitions SCHEDULED → INSTALLING.
+// Start records that the technician opened the install workflow without adding
+// an intermediate visible status. Install submissions now go SCHEDULED → ACTIVE.
 func (s *Service) Start(ctx context.Context, woID, userID string, gpsLat, gpsLng *float64) error {
 	wo, err := s.woRepo.FindByID(ctx, woID)
 	if err != nil {
@@ -172,11 +173,10 @@ func (s *Service) Start(ctx context.Context, woID, userID string, gpsLat, gpsLng
 	if wo == nil {
 		return ErrNotFound
 	}
-	if err := woDomain.MustTransition(wo.Status, woDomain.StatusInstalling); err != nil {
+	if wo.Status != woDomain.StatusScheduled {
 		return ErrStateInvalid
 	}
 	now := time.Now()
-	wo.Status = woDomain.StatusInstalling
 	wo.StartedAt = &now
 	if gpsLat != nil {
 		wo.GpsLat = gpsLat
@@ -188,7 +188,7 @@ func (s *Service) Start(ctx context.Context, woID, userID string, gpsLat, gpsLng
 	return s.woRepo.Update(ctx, wo)
 }
 
-// ScanInstall validates and adds a cover to an INSTALLING work order (draft — stock not yet cut).
+// ScanInstall validates and adds a cover to a scheduled install work order (draft — stock not yet cut).
 func (s *Service) ScanInstall(ctx context.Context, woID, coverCode string) (*coverDomain.Cover, error) {
 	wo, err := s.woRepo.FindByID(ctx, woID)
 	if err != nil {
@@ -197,7 +197,7 @@ func (s *Service) ScanInstall(ctx context.Context, woID, coverCode string) (*cov
 	if wo == nil {
 		return nil, ErrNotFound
 	}
-	if wo.Status != woDomain.StatusInstalling {
+	if wo.Status != woDomain.StatusScheduled && wo.Status != woDomain.StatusInstalling {
 		return nil, ErrStateInvalid
 	}
 
@@ -238,7 +238,7 @@ func (s *Service) ScanInstall(ctx context.Context, woID, coverCode string) (*cov
 	return c, nil
 }
 
-// UnscanInstall removes a cover draft from INSTALLING work order.
+// UnscanInstall removes a cover draft from a scheduled install work order.
 func (s *Service) UnscanInstall(ctx context.Context, woID, coverID string) error {
 	wo, err := s.woRepo.FindByID(ctx, woID)
 	if err != nil {
@@ -247,13 +247,13 @@ func (s *Service) UnscanInstall(ctx context.Context, woID, coverID string) error
 	if wo == nil {
 		return ErrNotFound
 	}
-	if wo.Status != woDomain.StatusInstalling {
+	if wo.Status != woDomain.StatusScheduled && wo.Status != woDomain.StatusInstalling {
 		return ErrStateInvalid
 	}
 	return s.woRepo.RemoveInstallation(ctx, woID, coverID)
 }
 
-// SubmitInstall transitions INSTALLING → ACTIVE atomically:
+// SubmitInstall transitions SCHEDULED → ACTIVE atomically:
 // marks all draft installations as installed, sets cover status to INSTALLED.
 func (s *Service) SubmitInstall(ctx context.Context, woID string, gpsLat, gpsLng *float64) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {

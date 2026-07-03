@@ -29,3 +29,14 @@ func TestDefaultCreateAssignee(t *testing.T) {
 		}
 	})
 }
+
+func TestCanCancelWorkOrderRole_ExecOnly(t *testing.T) {
+	if !canCancelWorkOrderRole(user.RoleExec) {
+		t.Fatalf("expected exec to be allowed to cancel work orders")
+	}
+	for _, role := range []user.Role{user.RoleTech, user.RoleAdmin, ""} {
+		if canCancelWorkOrderRole(role) {
+			t.Fatalf("expected role %q to be forbidden from cancelling work orders", role)
+		}
+	}
+}

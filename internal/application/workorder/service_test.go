@@ -178,7 +178,7 @@ func TestCreate_ReturnsScheduledWorkOrder(t *testing.T) {
 	assert.Equal(t, woDomain.StatusScheduled, wo.Status)
 }
 
-func TestStart_TransitionsToInstalling(t *testing.T) {
+func TestStart_DoesNotCreateInstallingStatus(t *testing.T) {
 	woRepo := &mockWORepo{}
 	coverRepo := &mockCoverRepo{}
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -187,7 +187,7 @@ func TestStart_TransitionsToInstalling(t *testing.T) {
 	wo := makeWO("wo-1", "office-1", woDomain.StatusScheduled)
 	woRepo.On("FindByID", mock.Anything, "wo-1").Return(wo, nil)
 	woRepo.On("Update", mock.Anything, mock.MatchedBy(func(w *woDomain.WorkOrder) bool {
-		return w.Status == woDomain.StatusInstalling
+		return w.Status == woDomain.StatusScheduled && w.StartedAt != nil
 	})).Return(nil)
 
 	err := svc.Start(context.Background(), "wo-1", "user-1", nil, nil)
@@ -215,7 +215,7 @@ func TestScanInstall_ValidCover_AddsInstallation(t *testing.T) {
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	svc := woApp.NewService(woRepo, coverRepo, db)
 
-	wo := makeWO("wo-1", "office-1", woDomain.StatusInstalling)
+	wo := makeWO("wo-1", "office-1", woDomain.StatusScheduled)
 	c := &coverDomain.Cover{
 		ID: "cover-1", AssetCode: "SC-001",
 		Status: coverDomain.StatusInStock, CurrentOfficeID: "office-1",
@@ -238,7 +238,7 @@ func TestScanInstall_NotInStock_ReturnsConflict(t *testing.T) {
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	svc := woApp.NewService(woRepo, coverRepo, db)
 
-	wo := makeWO("wo-1", "office-1", woDomain.StatusInstalling)
+	wo := makeWO("wo-1", "office-1", woDomain.StatusScheduled)
 	c := &coverDomain.Cover{
 		ID: "cover-1", Status: coverDomain.StatusInstalled, CurrentOfficeID: "office-1",
 	}
@@ -257,7 +257,7 @@ func TestScanInstall_WrongOffice_ReturnsConflict(t *testing.T) {
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	svc := woApp.NewService(woRepo, coverRepo, db)
 
-	wo := makeWO("wo-1", "office-1", woDomain.StatusInstalling)
+	wo := makeWO("wo-1", "office-1", woDomain.StatusScheduled)
 	c := &coverDomain.Cover{
 		ID: "cover-1", Status: coverDomain.StatusInStock, CurrentOfficeID: "office-2",
 	}

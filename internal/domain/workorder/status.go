@@ -28,7 +28,7 @@ var ErrInvalidTransition = errors.New("invalid work order status transition")
 
 // validTransitions defines allowed work order status transitions.
 var validTransitions = map[WorkOrderStatus][]WorkOrderStatus{
-	StatusScheduled:  {StatusInstalling, StatusCancelled},
+	StatusScheduled:  {StatusActive, StatusCancelled},
 	StatusInstalling: {StatusActive, StatusCancelled},
 	StatusActive:     {StatusRemovalDue, StatusRemoving},
 	StatusRemovalDue: {StatusRemoving},

@@ -58,7 +58,6 @@ func (s *Service) Summary(ctx context.Context, officeScope *string) (*Summary, e
 
 	statuses := []woDomain.WorkOrderStatus{
 		woDomain.StatusScheduled,
-		woDomain.StatusInstalling,
 		woDomain.StatusActive,
 		woDomain.StatusRemovalDue,
 		woDomain.StatusRemoving,

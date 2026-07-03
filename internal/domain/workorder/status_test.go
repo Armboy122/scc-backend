@@ -15,7 +15,7 @@ func TestIsValidTransition_WorkOrderStateMachine(t *testing.T) {
 		allowed bool
 	}{
 		// Valid transitions
-		{"scheduled -> installing", workorder.StatusScheduled, workorder.StatusInstalling, true},
+		{"scheduled -> active", workorder.StatusScheduled, workorder.StatusActive, true},
 		{"scheduled -> cancelled", workorder.StatusScheduled, workorder.StatusCancelled, true},
 		{"installing -> active", workorder.StatusInstalling, workorder.StatusActive, true},
 		{"installing -> cancelled", workorder.StatusInstalling, workorder.StatusCancelled, true},
@@ -31,7 +31,7 @@ func TestIsValidTransition_WorkOrderStateMachine(t *testing.T) {
 		{"active -> installing", workorder.StatusActive, workorder.StatusInstalling, false},
 		{"active -> completed", workorder.StatusActive, workorder.StatusCompleted, false},
 		{"removing -> active", workorder.StatusRemoving, workorder.StatusActive, false},
-		{"scheduled -> active", workorder.StatusScheduled, workorder.StatusActive, false},
+		{"scheduled -> installing", workorder.StatusScheduled, workorder.StatusInstalling, false},
 		{"scheduled -> completed", workorder.StatusScheduled, workorder.StatusCompleted, false},
 	}
 
@@ -49,7 +49,7 @@ func TestMustTransition_ReturnsErrorOnInvalidTransition(t *testing.T) {
 }
 
 func TestMustTransition_ReturnsNilOnValidTransition(t *testing.T) {
-	err := workorder.MustTransition(workorder.StatusScheduled, workorder.StatusInstalling)
+	err := workorder.MustTransition(workorder.StatusScheduled, workorder.StatusActive)
 	assert.NoError(t, err)
 }
 

@@ -34,6 +34,10 @@ func defaultCreateAssignee(role user.Role, userID string, requested *string) *st
 	return nil
 }
 
+func canCancelWorkOrderRole(role user.Role) bool {
+	return role == user.RoleExec
+}
+
 // List handles GET /workorders.
 func (h *WorkOrderHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -227,6 +231,10 @@ func (h *WorkOrderHandler) Start(w http.ResponseWriter, r *http.Request) {
 func (h *WorkOrderHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if !h.canAccessWorkOrder(w, r, id) {
+		return
+	}
+	if !canCancelWorkOrderRole(middleware.GetRoleFromCtx(r.Context())) {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "only executives can cancel work orders")
 		return
 	}
 	var req struct {
