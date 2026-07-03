@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	coverApp "github.com/smartcover/backend/internal/application/cover"
+	coverDomain "github.com/smartcover/backend/internal/domain/cover"
 	"github.com/smartcover/backend/internal/domain/user"
 	"github.com/smartcover/backend/internal/interfaces/http/middleware"
 	"github.com/smartcover/backend/internal/interfaces/http/response"
@@ -27,7 +29,7 @@ func (h *StockHandler) List(w http.ResponseWriter, r *http.Request) {
 	officeID := middleware.GetOfficeIDFromCtx(r.Context())
 
 	if role != user.RoleAdmin && officeID != nil {
-		summary, err := h.svc.GetStock(r.Context(), *officeID)
+		summary, err := h.summaryWithOffice(r.Context(), *officeID)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 			return
@@ -65,10 +67,23 @@ func (h *StockHandler) GetByOffice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summary, err := h.svc.GetStock(r.Context(), officeID)
+	summary, err := h.summaryWithOffice(r.Context(), officeID)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
 	response.JSON(w, http.StatusOK, summary)
+}
+
+func (h *StockHandler) summaryWithOffice(ctx context.Context, officeID string) (*coverDomain.StockSummary, error) {
+	summary, err := h.svc.GetStock(ctx, officeID)
+	if err != nil {
+		return nil, err
+	}
+	office, err := h.officeRepo.FindByID(ctx, officeID)
+	if err != nil {
+		return nil, err
+	}
+	summary.Office = office
+	return summary, nil
 }
