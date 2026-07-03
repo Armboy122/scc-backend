@@ -22,6 +22,10 @@ var ErrStateInvalid = errors.New("invalid state transition")
 // ErrConflict is returned when a cover cannot be scanned (wrong office / not in stock).
 var ErrConflict = errors.New("cover scan conflict")
 
+// ErrInsufficientStock is returned when planned install demand exceeds stock
+// remaining after pending work-order reservations for the same install day.
+var ErrInsufficientStock = errors.New("insufficient stock for planned work order quantity")
+
 // CreateParams holds the input for creating a work order.
 type CreateParams struct {
 	OfficeID      string
@@ -62,6 +66,9 @@ func NewService(woRepo woDomain.WorkOrderRepository, coverRepo coverDomain.Cover
 
 // Create opens a new work order in SCHEDULED status.
 func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrder, error) {
+	if err := s.ensurePlannedQtyAvailable(ctx, p.OfficeID, p.PlannedQty, p.InstallDate, nil); err != nil {
+		return nil, err
+	}
 	wo := &woDomain.WorkOrder{
 		ID:            uuid.NewString(),
 		Type:          woDomain.TypeInstall,
@@ -86,6 +93,28 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrd
 	return wo, nil
 }
 
+func (s *Service) ensurePlannedQtyAvailable(ctx context.Context, officeID string, plannedQty *int, installDate *time.Time, excludeWorkOrderID *string) error {
+	if plannedQty == nil || *plannedQty <= 0 || installDate == nil {
+		return nil
+	}
+	inStock, err := s.coverRepo.CountByOfficeAndStatus(ctx, officeID, coverDomain.StatusInStock)
+	if err != nil {
+		return err
+	}
+	reserved, err := s.woRepo.CountReservedPlannedByOfficeAndInstallDate(ctx, officeID, *installDate, excludeWorkOrderID)
+	if err != nil {
+		return err
+	}
+	available := inStock - reserved
+	if available < 0 {
+		available = 0
+	}
+	if int64(*plannedQty) > available {
+		return fmt.Errorf("planned quantity %d exceeds available %d after pending reservations: %w", *plannedQty, available, ErrInsufficientStock)
+	}
+	return nil
+}
+
 // UpdateScheduled edits mutable work order fields before field work starts.
 func (s *Service) UpdateScheduled(ctx context.Context, woID string, p CreateParams) (*woDomain.WorkOrder, error) {
 	wo, err := s.woRepo.FindByID(ctx, woID)
@@ -97,6 +126,9 @@ func (s *Service) UpdateScheduled(ctx context.Context, woID string, p CreatePara
 	}
 	if wo.Status != woDomain.StatusScheduled {
 		return nil, ErrStateInvalid
+	}
+	if err := s.ensurePlannedQtyAvailable(ctx, wo.OfficeID, p.PlannedQty, p.InstallDate, &woID); err != nil {
+		return nil, err
 	}
 	if p.CustomerName != "" {
 		wo.CustomerName = p.CustomerName

@@ -23,13 +23,15 @@ type Cover struct {
 
 // StockSummary holds a computed stock report for one office.
 type StockSummary struct {
-	OfficeID  string       `json:"officeId"`
-	Office    *user.Office `json:"office,omitempty"`
-	InStock   int64        `json:"inStock"`
-	Installed int64        `json:"installed"`
-	OnLoanOut int64        `json:"onLoanOut"`
-	OnLoanIn  int64        `json:"onLoanIn"`
-	Total     int64        `json:"total"`
+	OfficeID              string       `json:"officeId"`
+	Office                *user.Office `json:"office,omitempty"`
+	InStock               int64        `json:"inStock"`
+	ReservedPlanned       int64        `json:"reservedPlanned"`
+	AvailableForWorkOrder int64        `json:"availableForWorkOrder"`
+	Installed             int64        `json:"installed"`
+	OnLoanOut             int64        `json:"onLoanOut"`
+	OnLoanIn              int64        `json:"onLoanIn"`
+	Total                 int64        `json:"total"`
 }
 
 // LookupResult is the response from looking up a cover during a scan.

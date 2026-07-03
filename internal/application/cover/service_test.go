@@ -3,6 +3,7 @@ package cover_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	coverApp "github.com/smartcover/backend/internal/application/cover"
 	coverDomain "github.com/smartcover/backend/internal/domain/cover"
@@ -13,6 +14,12 @@ import (
 // --- Mock ---
 
 type mockCoverRepo struct{ mock.Mock }
+
+type fakeReservationCounter struct{ reserved int64 }
+
+func (f fakeReservationCounter) CountReservedPlannedByOfficeAndInstallDate(ctx context.Context, officeID string, installDate time.Time, excludeWorkOrderID *string) (int64, error) {
+	return f.reserved, nil
+}
 
 func (m *mockCoverRepo) FindByID(ctx context.Context, id string) (*coverDomain.Cover, error) {
 	args := m.Called(ctx, id)
@@ -234,4 +241,23 @@ func TestGetStock_ReturnsComputedSummary(t *testing.T) {
 	assert.Equal(t, int64(2), summary.OnLoanOut)
 	assert.Equal(t, int64(3), summary.OnLoanIn)
 	assert.Equal(t, int64(20), summary.Total)
+	assert.Equal(t, int64(15), summary.AvailableForWorkOrder)
+}
+
+func TestGetStock_WithInstallDateSubtractsPendingPlannedQty(t *testing.T) {
+	repo := &mockCoverRepo{}
+	svc := coverApp.NewService(repo, fakeReservationCounter{reserved: 6})
+	installDate := time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC)
+
+	repo.On("CountByOfficeAndStatus", mock.Anything, "office-1", coverDomain.StatusInStock).Return(int64(15), nil)
+	repo.On("CountByOfficeAndStatus", mock.Anything, "office-1", coverDomain.StatusInstalled).Return(int64(5), nil)
+	repo.On("CountOnLoanOut", mock.Anything, "office-1").Return(int64(2), nil)
+	repo.On("CountOnLoanIn", mock.Anything, "office-1").Return(int64(3), nil)
+
+	summary, err := svc.GetStock(context.Background(), "office-1", installDate)
+
+	assert.NoError(t, err)
+	assert.Equal(t, int64(15), summary.InStock)
+	assert.Equal(t, int64(6), summary.ReservedPlanned)
+	assert.Equal(t, int64(9), summary.AvailableForWorkOrder)
 }

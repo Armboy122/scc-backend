@@ -37,12 +37,24 @@ func GenerateQRCode(ownerOfficeID, assetCode string) string {
 
 // Service handles cover management operations.
 type Service struct {
-	coverRepo coverDomain.CoverRepository
+	coverRepo          coverDomain.CoverRepository
+	reservationCounter PlannedReservationCounter
+}
+
+// PlannedReservationCounter counts not-yet-submitted install demand that still
+// leaves covers physically IN_STOCK but must be reserved when planning another
+// work order for the same install date.
+type PlannedReservationCounter interface {
+	CountReservedPlannedByOfficeAndInstallDate(ctx context.Context, officeID string, installDate time.Time, excludeWorkOrderID *string) (int64, error)
 }
 
 // NewService creates a new cover Service.
-func NewService(coverRepo coverDomain.CoverRepository) *Service {
-	return &Service{coverRepo: coverRepo}
+func NewService(coverRepo coverDomain.CoverRepository, reservationCounter ...PlannedReservationCounter) *Service {
+	var rc PlannedReservationCounter
+	if len(reservationCounter) > 0 {
+		rc = reservationCounter[0]
+	}
+	return &Service{coverRepo: coverRepo, reservationCounter: rc}
 }
 
 // Register creates a single cover under an owner office.
@@ -128,11 +140,25 @@ func (s *Service) Lookup(ctx context.Context, code, officeID string) (*coverDoma
 	return result, nil
 }
 
-// GetStock returns a stock summary for an office.
-func (s *Service) GetStock(ctx context.Context, officeID string) (*coverDomain.StockSummary, error) {
+// GetStock returns a stock summary for an office. When installDate is provided,
+// AvailableForWorkOrder subtracts planned quantities from pending install work
+// orders scheduled on the same day, because those covers are still physically
+// IN_STOCK until field submission but are already committed for planning.
+func (s *Service) GetStock(ctx context.Context, officeID string, installDate ...time.Time) (*coverDomain.StockSummary, error) {
 	inStock, err := s.coverRepo.CountByOfficeAndStatus(ctx, officeID, coverDomain.StatusInStock)
 	if err != nil {
 		return nil, err
+	}
+	reservedPlanned := int64(0)
+	if len(installDate) > 0 && s.reservationCounter != nil {
+		reservedPlanned, err = s.reservationCounter.CountReservedPlannedByOfficeAndInstallDate(ctx, officeID, installDate[0], nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	availableForWorkOrder := inStock - reservedPlanned
+	if availableForWorkOrder < 0 {
+		availableForWorkOrder = 0
 	}
 	installed, err := s.coverRepo.CountByOfficeAndStatus(ctx, officeID, coverDomain.StatusInstalled)
 	if err != nil {
@@ -149,12 +175,14 @@ func (s *Service) GetStock(ctx context.Context, officeID string) (*coverDomain.S
 	total := inStock + installed
 
 	return &coverDomain.StockSummary{
-		OfficeID:  officeID,
-		InStock:   inStock,
-		Installed: installed,
-		OnLoanOut: onLoanOut,
-		OnLoanIn:  onLoanIn,
-		Total:     total,
+		OfficeID:              officeID,
+		InStock:               inStock,
+		ReservedPlanned:       reservedPlanned,
+		AvailableForWorkOrder: availableForWorkOrder,
+		Installed:             installed,
+		OnLoanOut:             onLoanOut,
+		OnLoanIn:              onLoanIn,
+		Total:                 total,
 	}, nil
 }
 

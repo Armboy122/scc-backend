@@ -151,7 +151,7 @@ func (h *WorkOrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	wo, err := h.svc.Create(r.Context(), params)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		h.handleWOError(w, err)
 		return
 	}
 	response.JSON(w, http.StatusCreated, wo)
@@ -431,6 +431,8 @@ func (h *WorkOrderHandler) handleWOError(w http.ResponseWriter, err error) {
 		response.Error(w, http.StatusConflict, "STATE_INVALID", err.Error())
 	case errors.Is(err, woApp.ErrConflict):
 		response.Error(w, http.StatusConflict, "CONFLICT", err.Error())
+	case errors.Is(err, woApp.ErrInsufficientStock):
+		response.Error(w, http.StatusConflict, "INSUFFICIENT_STOCK", err.Error())
 	case errors.Is(err, woDomain.ErrInvalidTransition):
 		response.Error(w, http.StatusConflict, "STATE_INVALID", err.Error())
 	default:

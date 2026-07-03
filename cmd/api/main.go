@@ -62,7 +62,7 @@ func main() {
 
 	// Services
 	authSvc := auth.NewService(userRepo, tokenRepo, cfg.JWTSecret, cfg.JWTAccessTTL, cfg.JWTRefreshTTL)
-	coverSvc := coverApp.NewService(coverRepo)
+	coverSvc := coverApp.NewService(coverRepo, woRepo)
 	woSvc := woApp.NewService(woRepo, coverRepo, db, notifRepo)
 	borrowSvc := borrowApp.NewService(borrowRepo, db, notifRepo)
 	dashSvc := dashApp.NewService(coverSvc, officeRepo, woRepo)

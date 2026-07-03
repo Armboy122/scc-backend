@@ -98,6 +98,23 @@ func (r *GormWorkOrderRepo) FindActiveByRemovalDue(ctx context.Context) ([]*work
 	return result, nil
 }
 
+func (r *GormWorkOrderRepo) CountReservedPlannedByOfficeAndInstallDate(ctx context.Context, officeID string, installDate time.Time, excludeWorkOrderID *string) (int64, error) {
+	start := time.Date(installDate.Year(), installDate.Month(), installDate.Day(), 0, 0, 0, 0, installDate.Location())
+	end := start.AddDate(0, 0, 1)
+	q := r.db.WithContext(ctx).Model(&WorkOrderModel{}).
+		Where("office_id = ?", officeID).
+		Where("type = ?", string(workorder.TypeInstall)).
+		Where("status IN ?", []string{string(workorder.StatusScheduled), string(workorder.StatusInstalling)}).
+		Where("install_date >= ? AND install_date < ?", start, end)
+	if excludeWorkOrderID != nil && *excludeWorkOrderID != "" {
+		q = q.Where("id <> ?", *excludeWorkOrderID)
+	}
+
+	var reserved int64
+	err := q.Select("COALESCE(SUM(planned_qty), 0)").Scan(&reserved).Error
+	return reserved, err
+}
+
 func (r *GormWorkOrderRepo) AddInstallation(ctx context.Context, inst *workorder.Installation) error {
 	m := fromInstallationDomain(inst)
 	return r.db.WithContext(ctx).Create(m).Error

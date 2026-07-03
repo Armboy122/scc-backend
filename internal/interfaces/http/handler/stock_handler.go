@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	coverApp "github.com/smartcover/backend/internal/application/cover"
@@ -29,7 +30,7 @@ func (h *StockHandler) List(w http.ResponseWriter, r *http.Request) {
 	officeID := middleware.GetOfficeIDFromCtx(r.Context())
 
 	if role != user.RoleAdmin && officeID != nil {
-		summary, err := h.summaryWithOffice(r.Context(), *officeID)
+		summary, err := h.summaryWithOffice(r.Context(), *officeID, stockInstallDate(r))
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 			return
@@ -45,7 +46,7 @@ func (h *StockHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	summaries := make([]interface{}, 0, len(offices))
 	for _, office := range offices {
-		summary, err := h.svc.GetStock(r.Context(), office.ID)
+		summary, err := h.svc.GetStock(r.Context(), office.ID, stockInstallDate(r)...)
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 			return
@@ -67,7 +68,7 @@ func (h *StockHandler) GetByOffice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summary, err := h.summaryWithOffice(r.Context(), officeID)
+	summary, err := h.summaryWithOffice(r.Context(), officeID, stockInstallDate(r))
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
@@ -75,8 +76,8 @@ func (h *StockHandler) GetByOffice(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, summary)
 }
 
-func (h *StockHandler) summaryWithOffice(ctx context.Context, officeID string) (*coverDomain.StockSummary, error) {
-	summary, err := h.svc.GetStock(ctx, officeID)
+func (h *StockHandler) summaryWithOffice(ctx context.Context, officeID string, installDate []time.Time) (*coverDomain.StockSummary, error) {
+	summary, err := h.svc.GetStock(ctx, officeID, installDate...)
 	if err != nil {
 		return nil, err
 	}
@@ -86,4 +87,18 @@ func (h *StockHandler) summaryWithOffice(ctx context.Context, officeID string) (
 	}
 	summary.Office = office
 	return summary, nil
+}
+
+func stockInstallDate(r *http.Request) []time.Time {
+	raw := r.URL.Query().Get("installDate")
+	if raw == "" {
+		return nil
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return []time.Time{t}
+	}
+	if t, err := time.ParseInLocation("2006-01-02", raw, time.FixedZone("Asia/Bangkok", 7*60*60)); err == nil {
+		return []time.Time{t}
+	}
+	return nil
 }
