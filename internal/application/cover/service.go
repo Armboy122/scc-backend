@@ -42,10 +42,10 @@ type Service struct {
 }
 
 // PlannedReservationCounter counts not-yet-submitted install demand that still
-// leaves covers physically IN_STOCK but must be reserved when planning another
-// work order for the same install date.
+// leaves covers physically IN_STOCK but must be reserved before planning another
+// work order for the same office.
 type PlannedReservationCounter interface {
-	CountReservedPlannedByOfficeAndInstallDate(ctx context.Context, officeID string, installDate time.Time, excludeWorkOrderID *string) (int64, error)
+	CountReservedPlannedByOffice(ctx context.Context, officeID string, excludeWorkOrderID *string) (int64, error)
 }
 
 // NewService creates a new cover Service.
@@ -140,18 +140,18 @@ func (s *Service) Lookup(ctx context.Context, code, officeID string) (*coverDoma
 	return result, nil
 }
 
-// GetStock returns a stock summary for an office. When installDate is provided,
-// AvailableForWorkOrder subtracts planned quantities from pending install work
-// orders scheduled on the same day, because those covers are still physically
-// IN_STOCK until field submission but are already committed for planning.
+// GetStock returns a stock summary for an office. AvailableForWorkOrder subtracts
+// planned quantities from pending install work orders, because those covers are
+// still physically IN_STOCK until field submission but are already committed for
+// planning.
 func (s *Service) GetStock(ctx context.Context, officeID string, installDate ...time.Time) (*coverDomain.StockSummary, error) {
 	inStock, err := s.coverRepo.CountByOfficeAndStatus(ctx, officeID, coverDomain.StatusInStock)
 	if err != nil {
 		return nil, err
 	}
 	reservedPlanned := int64(0)
-	if len(installDate) > 0 && s.reservationCounter != nil {
-		reservedPlanned, err = s.reservationCounter.CountReservedPlannedByOfficeAndInstallDate(ctx, officeID, installDate[0], nil)
+	if s.reservationCounter != nil {
+		reservedPlanned, err = s.reservationCounter.CountReservedPlannedByOffice(ctx, officeID, nil)
 		if err != nil {
 			return nil, err
 		}

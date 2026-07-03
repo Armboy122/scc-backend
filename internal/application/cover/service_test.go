@@ -17,7 +17,7 @@ type mockCoverRepo struct{ mock.Mock }
 
 type fakeReservationCounter struct{ reserved int64 }
 
-func (f fakeReservationCounter) CountReservedPlannedByOfficeAndInstallDate(ctx context.Context, officeID string, installDate time.Time, excludeWorkOrderID *string) (int64, error) {
+func (f fakeReservationCounter) CountReservedPlannedByOffice(ctx context.Context, officeID string, excludeWorkOrderID *string) (int64, error) {
 	return f.reserved, nil
 }
 

@@ -1,9 +1,6 @@
 package workorder
 
-import (
-	"context"
-	"time"
-)
+import "context"
 
 // WorkOrderRepository defines persistence operations for WorkOrder.
 type WorkOrderRepository interface {
@@ -12,7 +9,7 @@ type WorkOrderRepository interface {
 	Update(ctx context.Context, wo *WorkOrder) error
 	List(ctx context.Context, filter WorkOrderFilter) ([]*WorkOrder, int64, error)
 	FindActiveByRemovalDue(ctx context.Context) ([]*WorkOrder, error)
-	CountReservedPlannedByOfficeAndInstallDate(ctx context.Context, officeID string, installDate time.Time, excludeWorkOrderID *string) (int64, error)
+	CountReservedPlannedByOffice(ctx context.Context, officeID string, excludeWorkOrderID *string) (int64, error)
 
 	// Installation operations
 	AddInstallation(ctx context.Context, inst *Installation) error

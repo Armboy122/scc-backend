@@ -44,8 +44,8 @@ func (m *mockWORepo) FindActiveByRemovalDue(ctx context.Context) ([]*woDomain.Wo
 	return args.Get(0).([]*woDomain.WorkOrder), args.Error(1)
 }
 
-func (m *mockWORepo) CountReservedPlannedByOfficeAndInstallDate(ctx context.Context, officeID string, installDate time.Time, excludeWorkOrderID *string) (int64, error) {
-	args := m.Called(ctx, officeID, installDate, excludeWorkOrderID)
+func (m *mockWORepo) CountReservedPlannedByOffice(ctx context.Context, officeID string, excludeWorkOrderID *string) (int64, error) {
+	args := m.Called(ctx, officeID, excludeWorkOrderID)
 	return args.Get(0).(int64), args.Error(1)
 }
 
@@ -188,14 +188,31 @@ func TestCreate_WhenPendingReservationsUseStock_ReturnsInsufficientStock(t *test
 	coverRepo := &mockCoverRepo{}
 	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	svc := woApp.NewService(woRepo, coverRepo, db)
-	installDate := time.Date(2026, 7, 3, 0, 0, 0, 0, time.UTC)
 	plannedQty := 5
 
 	coverRepo.On("CountByOfficeAndStatus", mock.Anything, "office-1", coverDomain.StatusInStock).Return(int64(10), nil)
-	woRepo.On("CountReservedPlannedByOfficeAndInstallDate", mock.Anything, "office-1", installDate, (*string)(nil)).Return(int64(7), nil)
+	woRepo.On("CountReservedPlannedByOffice", mock.Anything, "office-1", (*string)(nil)).Return(int64(7), nil)
 
 	_, err := svc.Create(context.Background(), woApp.CreateParams{
-		OfficeID: "office-1", CustomerName: "Customer A", CreatedByID: "user-1", InstallDate: &installDate, PlannedQty: &plannedQty,
+		OfficeID: "office-1", CustomerName: "Customer A", CreatedByID: "user-1", PlannedQty: &plannedQty,
+	})
+
+	assert.ErrorIs(t, err, woApp.ErrInsufficientStock)
+	woRepo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
+}
+
+func TestCreate_WhenPendingReservationsUseAllRemainingStock_ReturnsInsufficientStock(t *testing.T) {
+	woRepo := &mockWORepo{}
+	coverRepo := &mockCoverRepo{}
+	db, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	svc := woApp.NewService(woRepo, coverRepo, db)
+	plannedQty := 1
+
+	coverRepo.On("CountByOfficeAndStatus", mock.Anything, "office-1", coverDomain.StatusInStock).Return(int64(10), nil)
+	woRepo.On("CountReservedPlannedByOffice", mock.Anything, "office-1", (*string)(nil)).Return(int64(10), nil)
+
+	_, err := svc.Create(context.Background(), woApp.CreateParams{
+		OfficeID: "office-1", CustomerName: "Customer B", CreatedByID: "user-1", PlannedQty: &plannedQty,
 	})
 
 	assert.ErrorIs(t, err, woApp.ErrInsufficientStock)

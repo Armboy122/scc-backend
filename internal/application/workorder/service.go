@@ -23,7 +23,7 @@ var ErrStateInvalid = errors.New("invalid state transition")
 var ErrConflict = errors.New("cover scan conflict")
 
 // ErrInsufficientStock is returned when planned install demand exceeds stock
-// remaining after pending work-order reservations for the same install day.
+// remaining after pending work-order reservations for the same office.
 var ErrInsufficientStock = errors.New("insufficient stock for planned work order quantity")
 
 // CreateParams holds the input for creating a work order.
@@ -66,7 +66,7 @@ func NewService(woRepo woDomain.WorkOrderRepository, coverRepo coverDomain.Cover
 
 // Create opens a new work order in SCHEDULED status.
 func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrder, error) {
-	if err := s.ensurePlannedQtyAvailable(ctx, p.OfficeID, p.PlannedQty, p.InstallDate, nil); err != nil {
+	if err := s.ensurePlannedQtyAvailable(ctx, p.OfficeID, p.PlannedQty, nil); err != nil {
 		return nil, err
 	}
 	wo := &woDomain.WorkOrder{
@@ -93,15 +93,15 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrd
 	return wo, nil
 }
 
-func (s *Service) ensurePlannedQtyAvailable(ctx context.Context, officeID string, plannedQty *int, installDate *time.Time, excludeWorkOrderID *string) error {
-	if plannedQty == nil || *plannedQty <= 0 || installDate == nil {
+func (s *Service) ensurePlannedQtyAvailable(ctx context.Context, officeID string, plannedQty *int, excludeWorkOrderID *string) error {
+	if plannedQty == nil || *plannedQty <= 0 {
 		return nil
 	}
 	inStock, err := s.coverRepo.CountByOfficeAndStatus(ctx, officeID, coverDomain.StatusInStock)
 	if err != nil {
 		return err
 	}
-	reserved, err := s.woRepo.CountReservedPlannedByOfficeAndInstallDate(ctx, officeID, *installDate, excludeWorkOrderID)
+	reserved, err := s.woRepo.CountReservedPlannedByOffice(ctx, officeID, excludeWorkOrderID)
 	if err != nil {
 		return err
 	}
@@ -110,7 +110,7 @@ func (s *Service) ensurePlannedQtyAvailable(ctx context.Context, officeID string
 		available = 0
 	}
 	if int64(*plannedQty) > available {
-		return fmt.Errorf("planned quantity %d exceeds available %d after pending reservations: %w", *plannedQty, available, ErrInsufficientStock)
+		return fmt.Errorf("planned quantity %d exceeds available %d after pending work-order reservations: %w", *plannedQty, available, ErrInsufficientStock)
 	}
 	return nil
 }
@@ -127,7 +127,7 @@ func (s *Service) UpdateScheduled(ctx context.Context, woID string, p CreatePara
 	if wo.Status != woDomain.StatusScheduled {
 		return nil, ErrStateInvalid
 	}
-	if err := s.ensurePlannedQtyAvailable(ctx, wo.OfficeID, p.PlannedQty, p.InstallDate, &woID); err != nil {
+	if err := s.ensurePlannedQtyAvailable(ctx, wo.OfficeID, p.PlannedQty, &woID); err != nil {
 		return nil, err
 	}
 	if p.CustomerName != "" {
