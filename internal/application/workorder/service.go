@@ -363,8 +363,9 @@ func (s *Service) StartRemoval(ctx context.Context, woID string) error {
 }
 
 // ScanRemove marks one cover as removed (cover → IN_STOCK immediately, atomic).
-func (s *Service) ScanRemove(ctx context.Context, woID, coverCode string) error {
-	return s.db.Transaction(func(tx *gorm.DB) error {
+func (s *Service) ScanRemove(ctx context.Context, woID, coverCode string) (*coverDomain.Cover, error) {
+	var scanned *coverDomain.Cover
+	err := s.db.Transaction(func(tx *gorm.DB) error {
 		txWORepo := newTxWORepo(tx)
 		txCoverRepo := newTxCoverRepo(tx)
 
@@ -386,6 +387,7 @@ func (s *Service) ScanRemove(ctx context.Context, woID, coverCode string) error 
 		if c == nil {
 			return fmt.Errorf("cover not found: %w", ErrConflict)
 		}
+		scanned = c
 
 		inst, err := txWORepo.FindInstallation(ctx, woID, c.ID)
 		if err != nil {
@@ -408,6 +410,10 @@ func (s *Service) ScanRemove(ctx context.Context, woID, coverCode string) error 
 		c.UpdatedAt = now
 		return txCoverRepo.Update(ctx, c)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return scanned, nil
 }
 
 // CompleteRemoval transitions REMOVING → COMPLETED (blocks if any installation still open).

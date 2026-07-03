@@ -361,11 +361,12 @@ func (h *WorkOrderHandler) ScanRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.ScanRemove(r.Context(), id, req.CoverCode); err != nil {
+	c, err := h.svc.ScanRemove(r.Context(), id, req.CoverCode)
+	if err != nil {
 		h.handleWOError(w, err)
 		return
 	}
-	response.NoContent(w)
+	response.JSON(w, http.StatusOK, c)
 }
 
 // PhotoRemove handles POST /workorders/:id/installations/:coverId/photo-remove.
