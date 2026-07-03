@@ -286,6 +286,8 @@ func (s *Service) SubmitInstall(ctx context.Context, woID string) error {
 				continue // already committed
 			}
 			inst.InstalledAt = &now
+			inst.GpsLat = wo.GpsLat
+			inst.GpsLng = wo.GpsLng
 			if err := txWORepo.UpdateInstallation(ctx, inst); err != nil {
 				return err
 			}
@@ -508,6 +510,8 @@ func (r *txWORepoAdapter) UpdateInstallation(ctx context.Context, inst *woDomain
 		Updates(map[string]interface{}{
 			"installed_at":      inst.InstalledAt,
 			"removed_at":        inst.RemovedAt,
+			"gps_lat":           inst.GpsLat,
+			"gps_lng":           inst.GpsLng,
 			"photo_install_url": inst.PhotoInstallURL,
 			"photo_remove_url":  inst.PhotoRemoveURL,
 		}).Error

@@ -270,6 +270,64 @@ func TestScanInstall_WrongOffice_ReturnsConflict(t *testing.T) {
 	assert.ErrorIs(t, err, woApp.ErrConflict)
 }
 
+func TestSubmitInstall_CopiesWorkOrderGPSOntoInstallations(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE work_orders (id text primary key, type text, status text, office_id text, customer_name text, gps_lat real, gps_lng real, updated_at datetime)`,
+		`CREATE TABLE installations (id text primary key, work_order_id text, cover_id text, gps_lat real, gps_lng real, installed_at datetime, removed_at datetime, photo_install_url text, photo_remove_url text)`,
+		`CREATE TABLE covers (id text primary key, asset_code text, qr_code text, status text, owner_office_id text, current_office_id text, updated_at datetime)`,
+	} {
+		if err := db.Exec(stmt).Error; err != nil {
+			t.Fatalf("create schema: %v", err)
+		}
+	}
+
+	lat := 13.7563
+	lng := 100.5018
+	if err := db.Exec(
+		`INSERT INTO work_orders (id, type, status, office_id, customer_name, gps_lat, gps_lng, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"wo-1", string(woDomain.TypeInstall), string(woDomain.StatusScheduled), "office-1", "Customer A", lat, lng, time.Now(),
+	).Error; err != nil {
+		t.Fatalf("insert work order: %v", err)
+	}
+	if err := db.Exec(
+		`INSERT INTO covers (id, asset_code, qr_code, status, owner_office_id, current_office_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"cover-1", "SC-001", "QR-001", string(coverDomain.StatusInStock), "office-1", "office-1", time.Now(),
+	).Error; err != nil {
+		t.Fatalf("insert cover: %v", err)
+	}
+	if err := db.Exec(
+		`INSERT INTO installations (id, work_order_id, cover_id) VALUES (?, ?, ?)`,
+		"inst-1", "wo-1", "cover-1",
+	).Error; err != nil {
+		t.Fatalf("insert installation: %v", err)
+	}
+
+	svc := woApp.NewService(&mockWORepo{}, &mockCoverRepo{}, db)
+
+	err = svc.SubmitInstall(context.Background(), "wo-1")
+
+	assert.NoError(t, err)
+	var got struct {
+		GpsLat      *float64
+		GpsLng      *float64
+		InstalledAt *time.Time
+	}
+	if err := db.Table("installations").Select("gps_lat, gps_lng, installed_at").Where("id = ?", "inst-1").First(&got).Error; err != nil {
+		t.Fatalf("read installation: %v", err)
+	}
+	if assert.NotNil(t, got.GpsLat) {
+		assert.Equal(t, lat, *got.GpsLat)
+	}
+	if assert.NotNil(t, got.GpsLng) {
+		assert.Equal(t, lng, *got.GpsLng)
+	}
+	assert.NotNil(t, got.InstalledAt)
+}
+
 func TestCompleteRemoval_WithOpenInstallations_BlocksClose(t *testing.T) {
 	woRepo := &mockWORepo{}
 	coverRepo := &mockCoverRepo{}
