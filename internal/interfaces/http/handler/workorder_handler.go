@@ -38,6 +38,15 @@ func canCancelWorkOrderRole(role user.Role) bool {
 	return role == user.RoleExec
 }
 
+func (h *WorkOrderHandler) respondWorkOrder(w http.ResponseWriter, r *http.Request, id string) {
+	wo, err := h.svc.GetByID(r.Context(), id)
+	if err != nil {
+		h.handleWOError(w, err)
+		return
+	}
+	response.JSON(w, http.StatusOK, wo)
+}
+
 // List handles GET /workorders.
 func (h *WorkOrderHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -246,7 +255,7 @@ func (h *WorkOrderHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 		h.handleWOError(w, err)
 		return
 	}
-	response.NoContent(w)
+	h.respondWorkOrder(w, r, id)
 }
 
 // Assign handles POST /workorders/:id/assign.
@@ -317,7 +326,7 @@ func (h *WorkOrderHandler) SubmitInstall(w http.ResponseWriter, r *http.Request)
 		h.handleWOError(w, err)
 		return
 	}
-	response.NoContent(w)
+	h.respondWorkOrder(w, r, id)
 }
 
 // PhotoInstall handles POST /workorders/:id/installations/:coverId/photo.
@@ -335,7 +344,7 @@ func (h *WorkOrderHandler) StartRemoval(w http.ResponseWriter, r *http.Request) 
 		h.handleWOError(w, err)
 		return
 	}
-	response.NoContent(w)
+	h.respondWorkOrder(w, r, id)
 }
 
 // ScanRemove handles POST /workorders/:id/scan-remove.
@@ -374,7 +383,7 @@ func (h *WorkOrderHandler) CompleteRemoval(w http.ResponseWriter, r *http.Reques
 		h.handleWOError(w, err)
 		return
 	}
-	response.NoContent(w)
+	h.respondWorkOrder(w, r, id)
 }
 
 func (h *WorkOrderHandler) updatePhoto(w http.ResponseWriter, r *http.Request, kind string) {
