@@ -76,7 +76,7 @@ ENV=production
 CORS_ORIGINS=*
 JWT_SECRET=<long-random-secret>
 JWT_ACCESS_TTL=15m
-JWT_REFRESH_TTL=720h
+JWT_REFRESH_TTL=168h
 
 POSTGRES_DB=smartcover
 POSTGRES_USER=smartcover

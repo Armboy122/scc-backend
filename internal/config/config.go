@@ -38,7 +38,7 @@ func Load() *Config {
 		AutoMigrate:    getBoolEnv("AUTO_MIGRATE", getEnv("ENV", "development") != "production"),
 		JWTSecret:      getEnv("JWT_SECRET", "change-me-in-production"),
 		JWTAccessTTL:   getDurationEnv("JWT_ACCESS_TTL", 15*time.Minute),
-		JWTRefreshTTL:  getDurationEnv("JWT_REFRESH_TTL", 720*time.Hour),
+		JWTRefreshTTL:  getDurationEnv("JWT_REFRESH_TTL", 168*time.Hour),
 		MinioEndpoint:  getEnv("MINIO_ENDPOINT", "scc-minio:9000"),
 		MinioAccessKey: getEnv("MINIO_ACCESS_KEY", "minioadmin"),
 		MinioSecretKey: getEnv("MINIO_SECRET_KEY", "minioadmin"),

@@ -24,6 +24,16 @@ func NewWorkOrderHandler(svc *woApp.Service) *WorkOrderHandler {
 	return &WorkOrderHandler{svc: svc}
 }
 
+func defaultCreateAssignee(role user.Role, userID string, requested *string) *string {
+	if requested != nil {
+		return requested
+	}
+	if role == user.RoleTech {
+		return &userID
+	}
+	return nil
+}
+
 // List handles GET /workorders.
 func (h *WorkOrderHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -120,7 +130,7 @@ func (h *WorkOrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		GpsLng:        req.GpsLng,
 		PlannedQty:    req.PlannedQty,
 		CreatedByID:   userID,
-		AssignedToID:  req.AssignedToID,
+		AssignedToID:  defaultCreateAssignee(role, userID, req.AssignedToID),
 	}
 	if req.InstallDate != nil {
 		t, err := time.Parse(time.RFC3339, *req.InstallDate)
