@@ -37,6 +37,16 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${CADDY_DATA_VOLUME:=scc-caddy-data}"
 : "${CADDY_CONFIG_VOLUME:=scc-caddy-config}"
 
+HEALTHCHECK_LABEL_KEY=io.smartcover.healthcheck
+BACKEND_HEALTHCHECK_REVISION=backend-readyz-v1
+POSTGRES_HEALTHCHECK_REVISION=postgres-pg-isready-v1
+MINIO_HEALTHCHECK_REVISION=minio-ready-v1
+CADDY_HEALTHCHECK_REVISION=caddy-admin-v1
+BACKEND_HEALTHCHECK_COMMAND='wget -q -T 5 -O /dev/null "http://127.0.0.1:${PORT}/api/v1/readyz"'
+POSTGRES_HEALTHCHECK_COMMAND='pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+MINIO_HEALTHCHECK_COMMAND='curl --fail --silent --show-error --max-time 5 http://127.0.0.1:9000/minio/health/ready >/dev/null'
+CADDY_HEALTHCHECK_COMMAND='curl --fail --silent --show-error --max-time 5 http://127.0.0.1:2019/config/ >/dev/null'
+
 pass_count=0
 warn_count=0
 fail_count=0
@@ -401,8 +411,20 @@ line_list_contains() {
   return 1
 }
 
+expected_healthcheck_contract() {
+  local name="$1"
+  case "${name}" in
+    "${CONTAINER_NAME}") printf '%s|%s\n' "${BACKEND_HEALTHCHECK_COMMAND}" "${BACKEND_HEALTHCHECK_REVISION}" ;;
+    "${POSTGRES_CONTAINER}") printf '%s|%s\n' "${POSTGRES_HEALTHCHECK_COMMAND}" "${POSTGRES_HEALTHCHECK_REVISION}" ;;
+    "${MINIO_CONTAINER}") printf '%s|%s\n' "${MINIO_HEALTHCHECK_COMMAND}" "${MINIO_HEALTHCHECK_REVISION}" ;;
+    "${CADDY_CONTAINER}") printf '%s|%s\n' "${CADDY_HEALTHCHECK_COMMAND}" "${CADDY_HEALTHCHECK_REVISION}" ;;
+    *) return 1 ;;
+  esac
+}
+
 inspect_container() {
   local name="$1" state running restarts health image_ref image_id networks expected_ref="" expected_id
+  local health_contract expected_health_contract
   if ! docker_call inspect "${name}" >/dev/null 2>&1; then
     fail docker "expected container ${name} is missing"
     return 0
@@ -419,11 +441,21 @@ inspect_container() {
   elif [[ "${health}" == "starting" ]]; then
     warn docker "container ${name} health is still starting"
   elif [[ "${health}" == "none" ]]; then
-    warn docker "container ${name} is running without a Docker healthcheck"
+    fail docker "container ${name} is running without its required Docker healthcheck"
   elif [[ "${health}" == "healthy" ]]; then
     pass docker "container ${name} is running and ${health}"
   else
     fail docker "container ${name} health state is malformed"
+  fi
+  if [[ "${health}" != "none" ]]; then
+    expected_health_contract="$(expected_healthcheck_contract "${name}")" || expected_health_contract=""
+    if ! health_contract="$(docker_call inspect -f '{{if .Config.Healthcheck}}{{index .Config.Healthcheck.Test 0}}|{{index .Config.Healthcheck.Test 1}}|{{index .Config.Labels "io.smartcover.healthcheck"}}{{else}}none||{{end}}' "${name}" 2>/dev/null)"; then
+      fail docker "container ${name} healthcheck contract could not be inspected"
+    elif [[ -z "${expected_health_contract}" || "${health_contract}" != "CMD-SHELL|${expected_health_contract}" ]]; then
+      fail docker "container ${name} Docker healthcheck command or revision has drifted"
+    else
+      pass docker "container ${name} Docker healthcheck matches the managed contract"
+    fi
   fi
   if ! is_non_negative_integer "${restarts}"; then
     fail docker "container ${name} restart count is unreadable"

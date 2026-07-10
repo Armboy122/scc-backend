@@ -116,6 +116,65 @@ The deploy script rejects any other values before Docker work. After the require
 - `/opt/scc-backend/Caddyfile` is installed atomically, mounted read-only, and verified with an explicit Caddy restart.
 - Public API and storage health are release gates. The Vercel login page is an optional gate configured by the `FRONTEND_HEALTHCHECK_URL` repository variable.
 
+### Docker-native healthchecks
+
+Every long-running container created by `deploy-vps.sh` carries a versioned
+`io.smartcover.healthcheck` label and a Docker-native healthcheck:
+
+| Container | In-container check | Secret handling |
+|---|---|---|
+| `scc-backend` | Alpine BusyBox `wget` to `http://127.0.0.1:${PORT}/api/v1/readyz` | No auth value; `PORT` is an explicit non-secret runtime override |
+| `scc-postgres` | `pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"` | Uses only environment variable references; no password appears in argv |
+| `scc-minio` | image-provided `curl` to `/minio/health/ready` on loopback | MinIO's health endpoint requires no root or application credential |
+| `scc-caddy` | image-provided `curl` to the loopback admin `/config/` endpoint | Reads no application secret and discards the response body |
+
+These commands were checked against the pinned production image set. The
+doctor verifies both Docker's runtime status and the exact managed
+command/revision contract; a missing or drifted healthcheck is a failure rather
+than an ignorable warning.
+
+Backend and Caddy are replaced on each release, so their healthchecks are
+installed during the normal candidate/switch flow. Existing PostgreSQL and
+MinIO containers cannot gain a healthcheck through `docker update`. After the
+required PostgreSQL predeploy dump, the deploy therefore performs a one-time
+controlled recreation when either healthcheck is missing or drifted: it stops
+and renames the old container, starts the same immutable image with the same
+validated named volume/network/env, waits for readiness, and only then removes
+the old container. A failed replacement is removed and the original container
+is renamed back and restarted. Release metadata records `unchanged`,
+`reconciled`, `reconciled-previous-retained`, `failed-original-restored`, or
+`rollback-failed` independently for PostgreSQL and MinIO. Expect a short
+dependency interruption during the first reconciliation.
+
+Docker marks a container unhealthy but does not restart it merely because a
+healthcheck failed. Keep `doctor-vps.sh`/external monitoring and alerting in
+place; `--restart unless-stopped` handles process/container exits, not an
+unhealthy state by itself.
+
+### Host swap safety net
+
+The 2 GiB VPS should keep a small disk-backed safety net for short memory
+spikes. This is a one-time reviewed host operation and is deliberately not run
+inside every application release:
+
+```bash
+sudo -n install -m 0755 scripts/provision-vps-swap.sh \
+  /opt/scc-backend/bin/provision-vps-swap.sh
+sudo -n /opt/scc-backend/bin/provision-vps-swap.sh
+sudo -n install -m 0644 deploy/99-scc-swap.conf \
+  /etc/sysctl.d/99-scc-swap.conf
+sudo -n sysctl -p /etc/sysctl.d/99-scc-swap.conf
+```
+
+The provisioner defaults to a 1 GiB `/swapfile` and retains at least 256 MiB
+of free disk beyond the requested allocation. It is root-only, lock-protected,
+idempotent, refuses symlinks/non-swap files, keeps mode `0600`, verifies
+activation, and installs one canonical `/etc/fstab` entry atomically. Existing
+valid swapfiles are never reformatted or resized in place. Override
+`SWAP_SIZE_MIB` only during a reviewed capacity change. The versioned sysctl
+policy keeps `vm.swappiness=10` so swap remains an emergency buffer rather than
+the normal working set.
+
 Container rollback does not roll back database schema. Use backward-compatible expand/migrate/contract changes. The predeploy dump and migration ledger/output are retained for reviewed recovery, but data is never restored automatically because either application version may have accepted newer writes. If a post-migration stage fails, inspect the recorded before/after/verified versions and ledger; roll the container back only when the forward schema remains compatible.
 
 ## Security notes

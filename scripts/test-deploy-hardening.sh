@@ -55,14 +55,14 @@ container_path() {
 remove_container() {
   local path
   path="$(container_path "$1")"
-  rm -f "${path}" "${path}.running" "${path}.image_ref" "${path}.image_id" "${path}.mounts"
+  rm -f "${path}" "${path}.running" "${path}.image_ref" "${path}.image_id" "${path}.mounts" "${path}.health"
 }
 
 move_container() {
   local old_path new_path suffix
   old_path="$(container_path "$1")"
   new_path="$(container_path "$2")"
-  for suffix in '' .running .image_ref .image_id .mounts; do
+  for suffix in '' .running .image_ref .image_id .mounts .health; do
     if [[ -e "${old_path}${suffix}" ]]; then
       mv "${old_path}${suffix}" "${new_path}${suffix}"
     fi
@@ -108,6 +108,7 @@ case "${1:-}" in
     fi
     case "${template}" in
       *State.Running*) cat "${path}.running" ;;
+      *Config.Healthcheck*) cat "${path}.health" ;;
       *Config.Image*) cat "${path}.image_ref" ;;
       *'{{.Image}}'*) cat "${path}.image_id" ;;
       *'.Mounts'*) cat "${path}.mounts" ;;
@@ -212,6 +213,25 @@ case "${1:-}" in
       path="$(container_path "${name}")"
       : >"${path}"
       printf 'true\n' >"${path}.running"
+      health_command=''
+      health_revision=''
+      previous=''
+      for arg in "$@"; do
+        case "${previous}" in
+          --health-cmd) health_command="${arg}" ;;
+          --label)
+            case "${arg}" in
+              io.smartcover.healthcheck=*) health_revision="${arg#io.smartcover.healthcheck=}" ;;
+            esac
+            ;;
+        esac
+        previous="${arg}"
+      done
+      if [[ -n "${health_command}" && -n "${health_revision}" ]]; then
+        printf 'CMD-SHELL|%s|%s\n' "${health_command}" "${health_revision}" >"${path}.health"
+      else
+        printf 'none||\n' >"${path}.health"
+      fi
       if [[ "${name}" == scc-caddy ]]; then
         printf 'sha256:%064d\n' 4 >"${path}.image_ref"
         printf 'sha256:%064d\n' 4 >"${path}.image_id"
@@ -342,14 +362,24 @@ init_container() {
   printf '%s\n' "${image_ref}" >"${docker_state_dir}/${name}.image_ref"
   printf '%s\n' "${image_id}" >"${docker_state_dir}/${name}.image_id"
   case "${name}" in
+    scc-backend)
+      printf 'CMD-SHELL|%s|%s\n' 'wget -q -T 5 -O /dev/null "http://127.0.0.1:${PORT}/api/v1/readyz"' backend-readyz-v1 >"${docker_state_dir}/${name}.health"
+      ;;
     scc-postgres)
       printf 'volume|scc-postgres-data|/var/lib/postgresql/data|true\n' >"${docker_state_dir}/${name}.mounts"
+      printf 'CMD-SHELL|%s|%s\n' 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' postgres-pg-isready-v1 >"${docker_state_dir}/${name}.health"
       ;;
     scc-minio)
       printf 'volume|scc-minio-data|/data|true\n' >"${docker_state_dir}/${name}.mounts"
+      printf 'CMD-SHELL|%s|%s\n' 'curl --fail --silent --show-error --max-time 5 http://127.0.0.1:9000/minio/health/ready >/dev/null' minio-ready-v1 >"${docker_state_dir}/${name}.health"
+      ;;
+    scc-caddy)
+      : >"${docker_state_dir}/${name}.mounts"
+      printf 'CMD-SHELL|%s|%s\n' 'curl --fail --silent --show-error --max-time 5 http://127.0.0.1:2019/config/ >/dev/null' caddy-admin-v1 >"${docker_state_dir}/${name}.health"
       ;;
     *)
       : >"${docker_state_dir}/${name}.mounts"
+      printf 'none||\n' >"${docker_state_dir}/${name}.health"
       ;;
   esac
 }
@@ -429,6 +459,18 @@ caddyfile_path="${tmpdir}/host-state/Caddyfile"
 deploy_state_dir="${tmpdir}/deploy-state"
 immutable_image="ghcr.io/example/scc-backend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+assert_native_healthcheck() {
+  local label="$1" run_line="$2" revision="$3" command_marker="$4"
+  local interval="$5" timeout="$6" retries="$7" start_period="$8"
+  if [[ -z "${run_line}" || "${run_line}" != *"--label io.smartcover.healthcheck=${revision}"* || \
+    "${run_line}" != *'--health-cmd '* || "${run_line}" != *"${command_marker}"* || \
+    "${run_line}" != *"--health-interval ${interval}"* || "${run_line}" != *"--health-timeout ${timeout}"* || \
+    "${run_line}" != *"--health-retries ${retries}"* || "${run_line}" != *"--health-start-period ${start_period}"* ]]; then
+    echo "FAIL: ${label} Docker run did not contain the managed native healthcheck contract" >&2
+    exit 1
+  fi
+}
+
 wildcard_cors_env="${tmpdir}/wildcard-cors.env"
 cp "${no_public_env}" "${wildcard_cors_env}"
 printf 'CORS_ORIGINS=*\n' >>"${wildcard_cors_env}"
@@ -502,6 +544,7 @@ assert_production_guard database-query-override "${database_query_override_env}"
 assert_production_guard optional-backup "${app_env}" PREDEPLOY_BACKUP_REQUIRED=false
 assert_production_guard malformed-source-commit "${app_env}" $'SOURCE_COMMIT=bad\ncommit'
 assert_production_guard invalid-health-timeout "${app_env}" HEALTHCHECK_TIMEOUT_SECONDS=0
+assert_production_guard mismatched-app-port "${app_env}" APP_PORT=8081
 
 malicious_env="${tmpdir}/malicious.env"
 cp "${app_env}" "${malicious_env}"
@@ -706,6 +749,7 @@ if [[ "${caddy_run_line}" != *"${caddyfile_path}:/etc/caddy/Caddyfile:ro"* ]]; t
   echo "FAIL: Caddy container must read-only bind-mount the persistent Caddyfile" >&2
   exit 1
 fi
+assert_native_healthcheck caddy "${caddy_run_line}" caddy-admin-v1 '127.0.0.1:2019/config/' 30s 10s 3 20s
 
 if find "$(dirname "${caddyfile_path}")" -name '.Caddyfile.tmp.*' -print -quit | grep -q .; then
   echo "FAIL: staged Caddyfile was not cleaned up after atomic install" >&2
@@ -807,6 +851,12 @@ if [[ "${active_run_line}" != *'-e AUTO_MIGRATE=false -e SEED_DATA=false -e RUN_
   echo "FAIL: active backend did not explicitly enable its single background-job owner" >&2
   exit 1
 fi
+assert_native_healthcheck 'backend candidate' "${candidate_run_line}" backend-readyz-v1 'api/v1/readyz' 30s 10s 3 30s
+assert_native_healthcheck 'active backend' "${active_run_line}" backend-readyz-v1 'api/v1/readyz' 30s 10s 3 30s
+if [[ "${candidate_run_line}" != *'-e PORT=8080 '* || "${active_run_line}" != *'-e PORT=8080 '* ]]; then
+  echo 'FAIL: backend healthcheck port was not made explicit in both runtime containers' >&2
+  exit 1
+fi
 
 if ! grep -q 'docker restart scc-caddy' "${log_file}"; then
   echo "FAIL: deploy did not prove Caddy restart persistence" >&2
@@ -878,8 +928,110 @@ if ! grep -q 'docker run -d --name scc-postgres .* --env-file ' "${log_file}" ||
   echo "FAIL: fresh infrastructure creation exposed database or object-store credentials in Docker arguments" >&2
   exit 1
 fi
+postgres_run_line="$(grep 'docker run -d --name scc-postgres ' "${log_file}" | head -n 1 || true)"
+minio_run_line="$(grep 'docker run -d --name scc-minio ' "${log_file}" | head -n 1 || true)"
+assert_native_healthcheck postgres "${postgres_run_line}" postgres-pg-isready-v1 pg_isready 10s 5s 5 60s
+assert_native_healthcheck minio "${minio_run_line}" minio-ready-v1 '/minio/health/ready' 30s 10s 3 30s
 if find "${deploy_state_dir}" -maxdepth 1 \( -name '.runtime-env.*' -o -name '.migration-env.*' -o -name '.postgres-env.*' -o -name '.minio-env.*' \) -print -quit | grep -q .; then
   echo "FAIL: short-lived Docker env files were not cleaned after infrastructure creation" >&2
+  exit 1
+fi
+
+# Existing data containers are reconciled only after the required PostgreSQL
+# checkpoint, retain their validated named volumes, and leave no stale previous
+# container once the new native healthchecks pass.
+reset_runtime_state
+printf 'none||\n' >"${docker_state_dir}/scc-postgres.health"
+printf 'CMD-SHELL|true|drifted-v0\n' >"${docker_state_dir}/scc-minio.health"
+if ! PATH="${bin_dir}:${PATH}" \
+  FAKE_DOCKER_LOG="${log_file}" \
+  FAKE_DOCKER_STATE_DIR="${docker_state_dir}" \
+  FAKE_CURL_LOG="${curl_log}" \
+  FAKE_TARGET_IMAGE_REF="${immutable_image}" \
+  APP_ENV_PATH="${no_public_env}" \
+  GHCR_IMAGE="${immutable_image}" \
+  CADDYFILE_PATH="${caddyfile_path}" \
+  DEPLOY_STATE_DIR="${deploy_state_dir}" \
+  RELEASE_ID="healthcheck-reconciliation-release" \
+  MANAGE_CADDY=false \
+  "${repo_root}/scripts/deploy-vps.sh" >/dev/null; then
+  echo "FAIL: deploy could not reconcile missing infrastructure healthchecks" >&2
+  exit 1
+fi
+if ! grep -q '^postgres_healthcheck=reconciled$' "${deploy_state_dir}/releases/healthcheck-reconciliation-release/release.env" || \
+  ! grep -q '^minio_healthcheck=reconciled$' "${deploy_state_dir}/releases/healthcheck-reconciliation-release/release.env"; then
+  echo "FAIL: release metadata did not record infrastructure healthcheck reconciliation" >&2
+  exit 1
+fi
+if [[ -e "${docker_state_dir}/scc-postgres-healthcheck-previous" || -e "${docker_state_dir}/scc-minio-healthcheck-previous" ]]; then
+  echo "FAIL: successful infrastructure healthcheck reconciliation retained a previous container" >&2
+  exit 1
+fi
+backup_before_health_line="$(grep -n 'docker exec scc-postgres pg_dump ' "${log_file}" | head -n 1 | cut -d: -f1)"
+postgres_health_stop_line="$(grep -n '^docker stop scc-postgres$' "${log_file}" | head -n 1 | cut -d: -f1)"
+minio_health_stop_line="$(grep -n '^docker stop scc-minio$' "${log_file}" | head -n 1 | cut -d: -f1)"
+if [[ -z "${backup_before_health_line}" || -z "${postgres_health_stop_line}" || -z "${minio_health_stop_line}" ]] || \
+  (( backup_before_health_line >= postgres_health_stop_line || backup_before_health_line >= minio_health_stop_line )); then
+  echo "FAIL: infrastructure healthcheck reconciliation did not wait for the required predeploy backup" >&2
+  exit 1
+fi
+postgres_run_line="$(grep 'docker run -d --name scc-postgres ' "${log_file}" | head -n 1 || true)"
+minio_run_line="$(grep 'docker run -d --name scc-minio ' "${log_file}" | head -n 1 || true)"
+assert_native_healthcheck postgres "${postgres_run_line}" postgres-pg-isready-v1 pg_isready 10s 5s 5 60s
+assert_native_healthcheck minio "${minio_run_line}" minio-ready-v1 '/minio/health/ready' 30s 10s 3 30s
+
+# A failed replacement is removed and the original data container is restored
+# before the release exits.
+reset_runtime_state
+printf 'none||\n' >"${docker_state_dir}/scc-postgres.health"
+if PATH="${bin_dir}:${PATH}" \
+  FAKE_DOCKER_LOG="${log_file}" \
+  FAKE_DOCKER_STATE_DIR="${docker_state_dir}" \
+  FAKE_CURL_LOG="${curl_log}" \
+  FAKE_TARGET_IMAGE_REF="${immutable_image}" \
+  FAIL_RUN_CONTAINER=scc-postgres \
+  APP_ENV_PATH="${no_public_env}" \
+  GHCR_IMAGE="${immutable_image}" \
+  CADDYFILE_PATH="${caddyfile_path}" \
+  DEPLOY_STATE_DIR="${deploy_state_dir}" \
+  RELEASE_ID="healthcheck-reconciliation-failure" \
+  MANAGE_CADDY=false \
+  "${repo_root}/scripts/deploy-vps.sh" >/dev/null 2>&1; then
+  echo "FAIL: deploy accepted failed PostgreSQL healthcheck reconciliation" >&2
+  exit 1
+fi
+if [[ ! -e "${docker_state_dir}/scc-postgres" || "$(cat "${docker_state_dir}/scc-postgres.running")" != true || \
+  -e "${docker_state_dir}/scc-postgres-healthcheck-previous" ]]; then
+  echo "FAIL: failed PostgreSQL healthcheck reconciliation did not restore the original container" >&2
+  exit 1
+fi
+if ! grep -q '^postgres_healthcheck=failed-original-restored$' \
+  "${deploy_state_dir}/releases/healthcheck-reconciliation-failure/release.env"; then
+  echo "FAIL: failed PostgreSQL healthcheck reconciliation did not record its restored outcome" >&2
+  exit 1
+fi
+
+reset_runtime_state
+init_container scc-postgres-healthcheck-previous "${POSTGRES_IMAGE:-postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}" sha256:old-healthcheck-container
+reserved_health_stderr="${tmpdir}/reserved-healthcheck-previous.stderr"
+if PATH="${bin_dir}:${PATH}" \
+  FAKE_DOCKER_LOG="${log_file}" \
+  FAKE_DOCKER_STATE_DIR="${docker_state_dir}" \
+  FAKE_CURL_LOG="${curl_log}" \
+  FAKE_TARGET_IMAGE_REF="${immutable_image}" \
+  APP_ENV_PATH="${no_public_env}" \
+  GHCR_IMAGE="${immutable_image}" \
+  CADDYFILE_PATH="${caddyfile_path}" \
+  DEPLOY_STATE_DIR="${deploy_state_dir}" \
+  RELEASE_ID="reserved-healthcheck-previous" \
+  MANAGE_CADDY=false \
+  "${repo_root}/scripts/deploy-vps.sh" >/dev/null 2>"${reserved_health_stderr}"; then
+  echo "FAIL: deploy accepted a reserved infrastructure previous container" >&2
+  exit 1
+fi
+if ! grep -q 'reserved deploy container exists' "${reserved_health_stderr}" || \
+  grep -Eq 'pg_dump|--entrypoint /app/scc-migrate|--name scc-backend-candidate' "${log_file}"; then
+  echo "FAIL: reserved infrastructure previous container was not rejected before release work" >&2
   exit 1
 fi
 
@@ -1524,12 +1676,19 @@ for release_check in \
   'bash scripts/test-deploy-hardening.sh' \
   'bash scripts/test-doctor-vps.sh' \
   'bash scripts/test-backup-recovery.sh' \
-  'bash scripts/test-minio-service-account-rotation.sh'; do
+  'bash scripts/test-minio-service-account-rotation.sh' \
+  'bash scripts/test-provision-vps-swap.sh'; do
   if ! grep -Fq "${release_check}" "${repo_root}/.github/workflows/deploy.yml"; then
     echo "FAIL: backend CI must run release-tooling check: ${release_check}" >&2
     exit 1
   fi
 done
+
+if [[ ! -f "${repo_root}/deploy/99-scc-swap.conf" || -L "${repo_root}/deploy/99-scc-swap.conf" ]] || \
+  [[ "$(grep -Fxc 'vm.swappiness=10' "${repo_root}/deploy/99-scc-swap.conf")" -ne 1 ]]; then
+  echo "FAIL: the reviewed VPS swappiness policy must be a regular versioned file set to 10" >&2
+  exit 1
+fi
 
 if ! grep -q 'sudo -n systemctl disable --now nginx' "${repo_root}/scripts/deploy-vps.sh" || \
   ! grep -q 'sudo -n pkill -x nginx' "${repo_root}/scripts/deploy-vps.sh"; then

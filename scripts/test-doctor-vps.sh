@@ -70,16 +70,45 @@ case "${1:-}" in
         health=healthy
         image_id="${other_id}"
         image_ref="pinned@example"
-        [[ "${name}" == "scc-caddy" ]] && health=none
         if [[ "${name}" == "scc-backend" ]]; then
           image_id="${backend_id}"
           image_ref="${backend_id}"
         fi
         [[ "${FAKE_IMAGE_DRIFT_CONTAINER:-}" == "${name}" ]] && image_id='sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
         [[ "${FAKE_UNHEALTHY_CONTAINER:-}" == "${name}" ]] && health=unhealthy
+        [[ "${FAKE_MISSING_HEALTHCHECK_CONTAINER:-}" == "${name}" ]] && health=none
         running=true
         [[ "${FAKE_STOPPED_CONTAINER:-}" == "${name}" ]] && running=false
         printf '%s|%s|%s|%s|%s\n' "${running}" "${FAKE_RESTART_COUNT:-0}" "${health}" "${image_ref}" "${image_id}"
+        ;;
+      *Config.Healthcheck*)
+        if [[ "${FAKE_MISSING_HEALTHCHECK_CONTAINER:-}" == "${name}" ]]; then
+          printf 'none||\n'
+          exit 0
+        fi
+        case "${name}" in
+          scc-backend)
+            command='wget -q -T 5 -O /dev/null "http://127.0.0.1:${PORT}/api/v1/readyz"'
+            revision=backend-readyz-v1
+            ;;
+          scc-postgres)
+            command='pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            revision=postgres-pg-isready-v1
+            ;;
+          scc-minio)
+            command='curl --fail --silent --show-error --max-time 5 http://127.0.0.1:9000/minio/health/ready >/dev/null'
+            revision=minio-ready-v1
+            ;;
+          scc-caddy)
+            command='curl --fail --silent --show-error --max-time 5 http://127.0.0.1:2019/config/ >/dev/null'
+            revision=caddy-admin-v1
+            ;;
+        esac
+        if [[ "${FAKE_HEALTHCHECK_DRIFT_CONTAINER:-}" == "${name}" ]]; then
+          command=true
+          revision=drifted-v0
+        fi
+        printf 'CMD-SHELL|%s|%s\n' "${command}" "${revision}"
         ;;
       *'.Config.Env'*)
         printf 'ENV=production\n'
@@ -343,6 +372,11 @@ expect_failure() {
 healthy_output="$(expect_success healthy)"
 [[ "${healthy_output}" == *'WARN public'* ]] || { echo 'FAIL: disabled public checks were not reported' >&2; exit 1; }
 [[ "${healthy_output}" == *'Phase 2 borrowing flag is explicitly false'* ]] || { echo 'FAIL: Phase 2 feature flag state was not reported' >&2; exit 1; }
+if [[ "$(printf '%s\n' "${healthy_output}" | grep -c 'Docker healthcheck matches the managed contract')" -ne 4 ]]; then
+  echo 'FAIL: healthy doctor run did not verify all four Docker healthcheck contracts' >&2
+  exit 1
+fi
+[[ "${healthy_output}" != *'without its required Docker healthcheck'* ]] || { echo 'FAIL: healthy doctor run reported a missing healthcheck' >&2; exit 1; }
 [[ ! -s "${curl_log}" ]] || { echo 'FAIL: healthy default run made an unconfigured public request' >&2; exit 1; }
 if grep -q 'leaked-secret-environment' "${docker_log}"; then
   echo 'FAIL: application secrets remained exported to Docker inspections' >&2
@@ -404,6 +438,8 @@ expect_failure 'runtime feature drift' 'active backend flags do not match the pr
 expect_failure 'runtime job-owner drift' 'active backend flags do not match the protected production environment' FAKE_RUNTIME_BACKGROUND_JOBS=false
 expect_failure 'infrastructure image drift' 'container scc-minio does not run its configured immutable image' FAKE_IMAGE_DRIFT_CONTAINER=scc-minio
 expect_failure 'read-only PostgreSQL volume' 'container scc-postgres is missing its expected writable named volume mount' FAKE_READONLY_VOLUME_CONTAINER=scc-postgres
+expect_failure 'missing Docker healthcheck' 'container scc-minio is running without its required Docker healthcheck' FAKE_MISSING_HEALTHCHECK_CONTAINER=scc-minio
+expect_failure 'drifted Docker healthcheck' 'container scc-caddy Docker healthcheck command or revision has drifted' FAKE_HEALTHCHECK_DRIFT_CONTAINER=scc-caddy
 
 expect_failure 'temporary Caddyfile' 'path must be absolute and outside temporary/runtime filesystems' CADDYFILE_PATH=/tmp/Caddyfile
 expect_failure 'public backend bind' 'backend must publish 8080 only on loopback' FAKE_PUBLIC_BACKEND_BIND=true

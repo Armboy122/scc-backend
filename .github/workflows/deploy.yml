@@ -44,6 +44,7 @@ jobs:
           bash scripts/test-doctor-vps.sh
           bash scripts/test-backup-recovery.sh
           bash scripts/test-minio-service-account-rotation.sh
+          bash scripts/test-provision-vps-swap.sh
 
   build-and-push:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')

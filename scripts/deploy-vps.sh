@@ -31,6 +31,8 @@ set -euo pipefail
 : "${PREVIOUS_CONTAINER:=${CONTAINER_NAME}-previous}"
 : "${CANDIDATE_HOST_PORT:=127.0.0.1:18080}"
 : "${CADDY_PREVIOUS_CONTAINER:=${CADDY_CONTAINER}-previous}"
+: "${POSTGRES_HEALTH_PREVIOUS_CONTAINER:=${POSTGRES_CONTAINER}-healthcheck-previous}"
+: "${MINIO_HEALTH_PREVIOUS_CONTAINER:=${MINIO_CONTAINER}-healthcheck-previous}"
 : "${DEPLOY_STATE_DIR:=$(dirname -- "${APP_ENV_PATH}")/deploy}"
 : "${DEPLOY_LOCK_PATH:=${DEPLOY_STATE_DIR}/deploy.lock}"
 : "${RELEASES_DIR:=${DEPLOY_STATE_DIR}/releases}"
@@ -40,6 +42,16 @@ set -euo pipefail
 : "${RELEASE_ID:=$(date -u +%Y%m%dT%H%M%SZ)}"
 : "${SOURCE_COMMIT:=unknown}"
 : "${HEALTHCHECK_TIMEOUT_SECONDS:=10}"
+
+HEALTHCHECK_LABEL_KEY=io.smartcover.healthcheck
+BACKEND_HEALTHCHECK_REVISION=backend-readyz-v1
+POSTGRES_HEALTHCHECK_REVISION=postgres-pg-isready-v1
+MINIO_HEALTHCHECK_REVISION=minio-ready-v1
+CADDY_HEALTHCHECK_REVISION=caddy-admin-v1
+BACKEND_HEALTHCHECK_COMMAND='wget -q -T 5 -O /dev/null "http://127.0.0.1:${PORT}/api/v1/readyz"'
+POSTGRES_HEALTHCHECK_COMMAND='pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+MINIO_HEALTHCHECK_COMMAND='curl --fail --silent --show-error --max-time 5 http://127.0.0.1:9000/minio/health/ready >/dev/null'
+CADDY_HEALTHCHECK_COMMAND='curl --fail --silent --show-error --max-time 5 http://127.0.0.1:2019/config/ >/dev/null'
 
 umask 077
 export -n GHCR_TOKEN GHCR_USERNAME 2>/dev/null || true
@@ -308,6 +320,10 @@ MINIO_MC_IMAGE_ID=""
 CADDY_IMAGE_ID=""
 backend_switch_abort_recovery_failed=false
 caddy_switch_abort_recovery_failed=false
+postgres_health_previous_available=false
+postgres_health_previous_was_running=false
+minio_health_previous_available=false
+minio_health_previous_was_running=false
 
 host_port() {
   local binding="$1"
@@ -417,6 +433,11 @@ preflight_deploy() {
     echo "HEALTHCHECK_TIMEOUT_SECONDS must be an integer from 1 through 300" >&2
     return 1
   fi
+  if [[ ! "${APP_PORT}" =~ ^[1-9][0-9]*$ ]] || (( 10#${APP_PORT} > 65535 )) || \
+    [[ "${APP_PORT}" != "${PORT:-8080}" ]]; then
+    echo "APP_PORT must be a valid port and match PORT (or the API default 8080)" >&2
+    return 1
+  fi
   for image_ref in "${POSTGRES_IMAGE}" "${MINIO_IMAGE}" "${MINIO_MC_IMAGE}" "${CADDY_IMAGE}"; do
     if ! is_immutable_image_ref "${image_ref}"; then
       echo "POSTGRES_IMAGE, MINIO_IMAGE, MINIO_MC_IMAGE, and CADDY_IMAGE must all use sha256 digest references" >&2
@@ -442,7 +463,9 @@ preflight_deploy() {
     return 1
   fi
 
-  if container_exists "${CANDIDATE_CONTAINER}" || container_exists "${PREVIOUS_CONTAINER}" || container_exists "${CADDY_PREVIOUS_CONTAINER}"; then
+  if container_exists "${CANDIDATE_CONTAINER}" || container_exists "${PREVIOUS_CONTAINER}" || \
+    container_exists "${CADDY_PREVIOUS_CONTAINER}" || container_exists "${POSTGRES_HEALTH_PREVIOUS_CONTAINER}" || \
+    container_exists "${MINIO_HEALTH_PREVIOUS_CONTAINER}"; then
     echo "reserved deploy container exists; reconcile candidate/previous containers before retrying" >&2
     return 1
   fi
@@ -528,6 +551,48 @@ wait_for_minio() {
   return 1
 }
 
+container_healthcheck_is_current() {
+  local container="$1" expected_command="$2" expected_revision="$3" actual
+  if ! actual="$(docker inspect -f '{{if .Config.Healthcheck}}{{index .Config.Healthcheck.Test 0}}|{{index .Config.Healthcheck.Test 1}}|{{index .Config.Labels "io.smartcover.healthcheck"}}{{else}}none||{{end}}' "${container}" 2>/dev/null)"; then
+    return 1
+  fi
+  [[ "${actual}" == "CMD-SHELL|${expected_command}|${expected_revision}" ]]
+}
+
+create_postgres_container() {
+  docker run -d \
+    --name "${POSTGRES_CONTAINER}" \
+    --restart unless-stopped \
+    --network "${DOCKER_NETWORK}" \
+    --env-file "${POSTGRES_RUNTIME_ENV_FILE}" \
+    --label "${HEALTHCHECK_LABEL_KEY}=${POSTGRES_HEALTHCHECK_REVISION}" \
+    --health-cmd "${POSTGRES_HEALTHCHECK_COMMAND}" \
+    --health-interval 10s \
+    --health-timeout 5s \
+    --health-retries 5 \
+    --health-start-period 60s \
+    -v "${POSTGRES_VOLUME}:/var/lib/postgresql/data" \
+    "${POSTGRES_IMAGE_ID}" >/dev/null
+}
+
+create_minio_container() {
+  docker run -d \
+    --name "${MINIO_CONTAINER}" \
+    --restart unless-stopped \
+    --network "${DOCKER_NETWORK}" \
+    -p "${MINIO_API_HOST_PORT}:9000" \
+    -p "${MINIO_CONSOLE_HOST_PORT}:9001" \
+    --env-file "${MINIO_RUNTIME_ENV_FILE}" \
+    --label "${HEALTHCHECK_LABEL_KEY}=${MINIO_HEALTHCHECK_REVISION}" \
+    --health-cmd "${MINIO_HEALTHCHECK_COMMAND}" \
+    --health-interval 30s \
+    --health-timeout 10s \
+    --health-retries 3 \
+    --health-start-period 30s \
+    -v "${MINIO_VOLUME}:/data" \
+    "${MINIO_IMAGE_ID}" server /data --console-address ':9001' >/dev/null
+}
+
 ensure_postgres() {
   docker volume create "${POSTGRES_VOLUME}" >/dev/null
   if container_exists "${POSTGRES_CONTAINER}"; then
@@ -538,13 +603,7 @@ ensure_postgres() {
       docker start "${POSTGRES_CONTAINER}" >/dev/null
     fi
   else
-    docker run -d \
-      --name "${POSTGRES_CONTAINER}" \
-      --restart unless-stopped \
-      --network "${DOCKER_NETWORK}" \
-      --env-file "${POSTGRES_RUNTIME_ENV_FILE}" \
-      -v "${POSTGRES_VOLUME}:/var/lib/postgresql/data" \
-      "${POSTGRES_IMAGE_ID}" >/dev/null
+    create_postgres_container
   fi
   wait_for_postgres
 }
@@ -559,17 +618,94 @@ ensure_minio() {
       docker start "${MINIO_CONTAINER}" >/dev/null
     fi
   else
-    docker run -d \
-      --name "${MINIO_CONTAINER}" \
-      --restart unless-stopped \
-      --network "${DOCKER_NETWORK}" \
-      -p "${MINIO_API_HOST_PORT}:9000" \
-      -p "${MINIO_CONSOLE_HOST_PORT}:9001" \
-      --env-file "${MINIO_RUNTIME_ENV_FILE}" \
-      -v "${MINIO_VOLUME}:/data" \
-      "${MINIO_IMAGE_ID}" server /data --console-address ':9001' >/dev/null
+    create_minio_container
   fi
   wait_for_minio
+}
+
+restore_infrastructure_previous() {
+  local active="$1" previous="$2" was_running="$3" wait_function="$4"
+  docker rm -f "${active}" >/dev/null 2>&1 || true
+  docker rename "${previous}" "${active}" || return 1
+  if [[ "${was_running}" == "true" ]]; then
+    docker start "${active}" >/dev/null || return 1
+    "${wait_function}"
+  fi
+}
+
+reconcile_postgres_healthcheck() {
+  if container_healthcheck_is_current "${POSTGRES_CONTAINER}" "${POSTGRES_HEALTHCHECK_COMMAND}" "${POSTGRES_HEALTHCHECK_REVISION}"; then
+    append_release_metadata postgres_healthcheck unchanged
+    return 0
+  fi
+  container_running "${POSTGRES_CONTAINER}" && postgres_health_previous_was_running=true
+  if [[ "${postgres_health_previous_was_running}" == "true" ]]; then
+    docker stop "${POSTGRES_CONTAINER}" >/dev/null || return 1
+  fi
+  if ! docker rename "${POSTGRES_CONTAINER}" "${POSTGRES_HEALTH_PREVIOUS_CONTAINER}"; then
+    [[ "${postgres_health_previous_was_running}" != "true" ]] || docker start "${POSTGRES_CONTAINER}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  postgres_health_previous_available=true
+  if ! create_postgres_container || ! wait_for_postgres; then
+    if ! restore_infrastructure_previous "${POSTGRES_CONTAINER}" "${POSTGRES_HEALTH_PREVIOUS_CONTAINER}" "${postgres_health_previous_was_running}" wait_for_postgres; then
+      append_release_metadata postgres_healthcheck rollback-failed
+      echo "CRITICAL: PostgreSQL healthcheck reconciliation and rollback both failed" >&2
+      return 90
+    fi
+    postgres_health_previous_available=false
+    append_release_metadata postgres_healthcheck failed-original-restored
+    echo "PostgreSQL healthcheck reconciliation failed; the original container was restored" >&2
+    return 1
+  fi
+  if ! docker rm "${POSTGRES_HEALTH_PREVIOUS_CONTAINER}" >/dev/null; then
+    echo "WARNING: PostgreSQL healthcheck is active but ${POSTGRES_HEALTH_PREVIOUS_CONTAINER} could not be removed" >&2
+    append_release_metadata postgres_healthcheck reconciled-previous-retained
+    postgres_health_previous_available=false
+    return 0
+  fi
+  postgres_health_previous_available=false
+  append_release_metadata postgres_healthcheck reconciled
+}
+
+reconcile_minio_healthcheck() {
+  if container_healthcheck_is_current "${MINIO_CONTAINER}" "${MINIO_HEALTHCHECK_COMMAND}" "${MINIO_HEALTHCHECK_REVISION}"; then
+    append_release_metadata minio_healthcheck unchanged
+    return 0
+  fi
+  container_running "${MINIO_CONTAINER}" && minio_health_previous_was_running=true
+  if [[ "${minio_health_previous_was_running}" == "true" ]]; then
+    docker stop "${MINIO_CONTAINER}" >/dev/null || return 1
+  fi
+  if ! docker rename "${MINIO_CONTAINER}" "${MINIO_HEALTH_PREVIOUS_CONTAINER}"; then
+    [[ "${minio_health_previous_was_running}" != "true" ]] || docker start "${MINIO_CONTAINER}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  minio_health_previous_available=true
+  if ! create_minio_container || ! wait_for_minio; then
+    if ! restore_infrastructure_previous "${MINIO_CONTAINER}" "${MINIO_HEALTH_PREVIOUS_CONTAINER}" "${minio_health_previous_was_running}" wait_for_minio; then
+      append_release_metadata minio_healthcheck rollback-failed
+      echo "CRITICAL: MinIO healthcheck reconciliation and rollback both failed" >&2
+      return 90
+    fi
+    minio_health_previous_available=false
+    append_release_metadata minio_healthcheck failed-original-restored
+    echo "MinIO healthcheck reconciliation failed; the original container was restored" >&2
+    return 1
+  fi
+  if ! docker rm "${MINIO_HEALTH_PREVIOUS_CONTAINER}" >/dev/null; then
+    echo "WARNING: MinIO healthcheck is active but ${MINIO_HEALTH_PREVIOUS_CONTAINER} could not be removed" >&2
+    append_release_metadata minio_healthcheck reconciled-previous-retained
+    minio_health_previous_available=false
+    return 0
+  fi
+  minio_health_previous_available=false
+  append_release_metadata minio_healthcheck reconciled
+}
+
+reconcile_infrastructure_healthchecks() {
+  reconcile_postgres_healthcheck
+  reconcile_minio_healthcheck
 }
 
 configure_minio_bucket() {
@@ -1125,9 +1261,16 @@ run_backend_candidate() {
     --restart no \
     --network "${DOCKER_NETWORK}" \
     --env-file "${RUNTIME_ENV_FILE}" \
+    -e PORT="${APP_PORT}" \
     -e AUTO_MIGRATE=false \
     -e SEED_DATA=false \
     -e RUN_BACKGROUND_JOBS=false \
+    --label "${HEALTHCHECK_LABEL_KEY}=${BACKEND_HEALTHCHECK_REVISION}" \
+    --health-cmd "${BACKEND_HEALTHCHECK_COMMAND}" \
+    --health-interval 30s \
+    --health-timeout 10s \
+    --health-retries 3 \
+    --health-start-period 30s \
     -p "${CANDIDATE_HOST_PORT}:${APP_PORT}" \
     "${target_image_id}" >/dev/null; then
     echo "backend candidate could not start; current backend was not touched" >&2
@@ -1179,9 +1322,16 @@ switch_backend() {
     --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
     --env-file "${RUNTIME_ENV_FILE}" \
+    -e PORT="${APP_PORT}" \
     -e AUTO_MIGRATE=false \
     -e SEED_DATA=false \
     -e RUN_BACKGROUND_JOBS=true \
+    --label "${HEALTHCHECK_LABEL_KEY}=${BACKEND_HEALTHCHECK_REVISION}" \
+    --health-cmd "${BACKEND_HEALTHCHECK_COMMAND}" \
+    --health-interval 30s \
+    --health-timeout 10s \
+    --health-retries 3 \
+    --health-start-period 30s \
     -p "${HOST_PORT}:${APP_PORT}" \
     "${target_image_id}" >/dev/null; then
     echo "replacement backend could not start" >&2
@@ -1218,10 +1368,16 @@ on_deploy_exit() {
   local final_exit_code="${deploy_exit_code}"
   local backend_rollback_required="${backend_switched}"
   local caddy_rollback_required="${caddy_switched}"
+  local postgres_health_rollback_required="${postgres_health_previous_available}"
+  local minio_health_rollback_required="${minio_health_previous_available}"
   local backend_rollback_exit_code=0
   local caddy_rollback_exit_code=0
+  local postgres_health_rollback_exit_code=0
+  local minio_health_rollback_exit_code=0
   local backend_rollback_status=not-required
   local caddy_rollback_status=not-required
+  local postgres_health_rollback_status=not-required
+  local minio_health_rollback_status=not-required
   trap - EXIT
   cleanup_registry_auth
   cleanup_runtime_env
@@ -1235,6 +1391,34 @@ on_deploy_exit() {
     if [[ "${caddy_switch_abort_recovery_failed}" == "true" ]]; then
       caddy_rollback_exit_code=1
       caddy_rollback_status=failed
+    fi
+    if [[ "${postgres_health_rollback_required}" == "true" ]]; then
+      restore_infrastructure_previous \
+        "${POSTGRES_CONTAINER}" \
+        "${POSTGRES_HEALTH_PREVIOUS_CONTAINER}" \
+        "${postgres_health_previous_was_running}" \
+        wait_for_postgres
+      postgres_health_rollback_exit_code=$?
+      if [[ "${postgres_health_rollback_exit_code}" -eq 0 ]]; then
+        postgres_health_rollback_status=restored
+        postgres_health_previous_available=false
+      else
+        postgres_health_rollback_status=failed
+      fi
+    fi
+    if [[ "${minio_health_rollback_required}" == "true" ]]; then
+      restore_infrastructure_previous \
+        "${MINIO_CONTAINER}" \
+        "${MINIO_HEALTH_PREVIOUS_CONTAINER}" \
+        "${minio_health_previous_was_running}" \
+        wait_for_minio
+      minio_health_rollback_exit_code=$?
+      if [[ "${minio_health_rollback_exit_code}" -eq 0 ]]; then
+        minio_health_rollback_status=restored
+        minio_health_previous_available=false
+      else
+        minio_health_rollback_status=failed
+      fi
     fi
     if [[ "${backend_rollback_required}" == "true" ]]; then
       rollback_backend
@@ -1259,13 +1443,19 @@ on_deploy_exit() {
     append_release_metadata backend_rollback_exit_code "${backend_rollback_exit_code}"
     append_release_metadata caddy_rollback_status "${caddy_rollback_status}"
     append_release_metadata caddy_rollback_exit_code "${caddy_rollback_exit_code}"
-    if [[ "${backend_rollback_exit_code}" -ne 0 || "${caddy_rollback_exit_code}" -ne 0 ]]; then
+    append_release_metadata postgres_health_rollback_status "${postgres_health_rollback_status}"
+    append_release_metadata postgres_health_rollback_exit_code "${postgres_health_rollback_exit_code}"
+    append_release_metadata minio_health_rollback_status "${minio_health_rollback_status}"
+    append_release_metadata minio_health_rollback_exit_code "${minio_health_rollback_exit_code}"
+    if [[ "${backend_rollback_exit_code}" -ne 0 || "${caddy_rollback_exit_code}" -ne 0 || \
+      "${postgres_health_rollback_exit_code}" -ne 0 || "${minio_health_rollback_exit_code}" -ne 0 ]]; then
       append_release_metadata rollback_status failed
       final_exit_code=90
       write_release_result rollback_failed "${final_exit_code}"
-      echo "CRITICAL: deploy failed and rollback did not complete (backend=${backend_rollback_status}, caddy=${caddy_rollback_status})" >&2
+      echo "CRITICAL: deploy failed and rollback did not complete (backend=${backend_rollback_status}, caddy=${caddy_rollback_status}, postgres-health=${postgres_health_rollback_status}, minio-health=${minio_health_rollback_status})" >&2
     else
-      if [[ "${backend_rollback_required}" == "true" || "${caddy_rollback_required}" == "true" ]]; then
+      if [[ "${backend_rollback_required}" == "true" || "${caddy_rollback_required}" == "true" || \
+        "${postgres_health_rollback_required}" == "true" || "${minio_health_rollback_required}" == "true" ]]; then
         append_release_metadata rollback_status restored
       else
         append_release_metadata rollback_status not-required
@@ -1391,6 +1581,12 @@ EOF
     --name "${CADDY_CONTAINER}" \
     --restart unless-stopped \
     --network "${DOCKER_NETWORK}" \
+    --label "${HEALTHCHECK_LABEL_KEY}=${CADDY_HEALTHCHECK_REVISION}" \
+    --health-cmd "${CADDY_HEALTHCHECK_COMMAND}" \
+    --health-interval 30s \
+    --health-timeout 10s \
+    --health-retries 3 \
+    --health-start-period 20s \
     -p 80:80 \
     -p 443:443 \
     -v "${CADDYFILE_PATH}:/etc/caddy/Caddyfile:ro" \
@@ -1510,6 +1706,7 @@ ensure_network
 ensure_postgres
 ensure_minio
 create_predeploy_backup
+reconcile_infrastructure_healthchecks
 run_migration_contract
 configure_minio_bucket
 run_backend_candidate

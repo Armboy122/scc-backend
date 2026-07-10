@@ -125,6 +125,18 @@ Notes:
 - `POSTGRES_IMAGE`, `MINIO_IMAGE`, `MINIO_MC_IMAGE`, and `CADDY_IMAGE` must be repository references ending in `@sha256:<64-hex-digest>`. Existing PostgreSQL and MinIO containers must resolve to the configured image IDs or deployment stops before migrations.
 - The strict env parser writes separate short-lived Docker env files: PostgreSQL and MinIO bootstrap receive only their own root/bootstrap values, while the API/migration runtime allowlist excludes infrastructure root credentials and image controls.
 - Migration one-shots and the API candidate receive `RUN_BACKGROUND_JOBS=false`; only the activated backend receives `RUN_BACKGROUND_JOBS=true`. The API binary must honor this flag so candidate health checks cannot duplicate cron work.
+- All four long-running containers have versioned Docker-native healthchecks.
+  The backend probes `/api/v1/readyz`, PostgreSQL uses `pg_isready`, MinIO uses
+  its unauthenticated loopback readiness endpoint, and Caddy uses its loopback
+  admin config endpoint. No password, JWT, or MinIO key is placed in a health
+  command or Docker argument. See `docs/VPS_STACK.md` for reconciliation and
+  monitoring behavior.
+- A 2 GiB-class VPS should have a bounded swap safety net before real traffic.
+  `scripts/provision-vps-swap.sh` creates or reuses a secure 1 GiB swapfile,
+  activates it, and atomically deduplicates its `/etc/fstab` entry. Install the
+  versioned `deploy/99-scc-swap.conf` as `/etc/sysctl.d/99-scc-swap.conf` and
+  apply it to keep `vm.swappiness=10`. The swap provisioner is intentionally a
+  reviewed host operation, not an automatic step in every application deploy.
 - Keep all passwords/secrets out of git.
 
 ## GitHub Actions secrets
@@ -154,12 +166,15 @@ On push to `main`, `.github/workflows/deploy.yml` will:
 4. Upload `scripts/deploy-vps.sh` and the short-lived read-only GHCR credential into an unpredictable mode-`700` remote directory; fixed `/tmp` filenames are not used.
 5. Acquire `/opt/scc-backend/deploy/deploy.lock`, record secret-free release metadata, pull the immutable backend and infrastructure images, reject PostgreSQL/MinIO image or persistent-volume drift, and ensure the Docker network, PostgreSQL, and MinIO are healthy. The database URL is also required to identify the same managed PostgreSQL database captured by the predeploy dump.
 6. Create a required PostgreSQL custom-format dump, validate it with `pg_restore --list`, and publish it under `/opt/scc-backend/deploy/predeploy-backups/` before migrations or any candidate can run.
-7. Run the target image's one-shot migration contract on `scc-net`: `validate → check → status(before) → up → status(after) → version`. Every protected stdout/stderr artifact path, result, target version, before/after version, verified version, and applied count is recorded in the release metadata.
-8. Start the candidate on loopback port `18080` with background jobs disabled and require its internal health check to pass while the current backend remains available.
-9. Stop and retain the current backend as `scc-backend-previous`, start the replacement as the single background-job owner, and require its final internal health check.
-10. Atomically install and validate `/opt/scc-backend/Caddyfile`, retaining the previous Caddy container until public API and storage checks pass.
-11. Restart Caddy and repeat the public checks to prove the Caddyfile bind source is restart-safe. Check the frontend too when `FRONTEND_HEALTHCHECK_URL` is configured.
-12. Mark the release successful and remove previous containers. A failure after the switch automatically restores the previous backend, Caddy container, and Caddyfile.
+7. Reconcile missing/drifted PostgreSQL and MinIO Docker healthchecks by safely
+   recreating only the container configuration around the same validated named
+   volumes; a failed replacement restores the original container.
+8. Run the target image's one-shot migration contract on `scc-net`: `validate → check → status(before) → up → status(after) → version`. Every protected stdout/stderr artifact path, result, target version, before/after version, verified version, and applied count is recorded in the release metadata.
+9. Start the candidate on loopback port `18080` with background jobs disabled and require its internal health check to pass while the current backend remains available.
+10. Stop and retain the current backend as `scc-backend-previous`, start the replacement as the single background-job owner, and require its final internal health check.
+11. Atomically install and validate `/opt/scc-backend/Caddyfile`, retaining the previous Caddy container until public API and storage checks pass.
+12. Restart Caddy and repeat the public checks to prove the Caddyfile bind source is restart-safe. Check the frontend too when `FRONTEND_HEALTHCHECK_URL` is configured.
+13. Mark the release successful and remove previous containers. A failure after the switch automatically restores the previous backend, Caddy container, and Caddyfile.
 
 Release records are stored under `/opt/scc-backend/deploy/releases/<release-id>/`. `release.env` contains only secret-free image, migration-version, artifact-path, health/rollback, timestamp, and predeploy-dump metadata. Migration stdout/stderr artifacts are mode `0600` inside the mode `0700` release directory; treat them as operator-only diagnostics because invariant failures can contain sample resource IDs.
 
