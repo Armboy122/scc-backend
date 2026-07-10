@@ -15,7 +15,9 @@ set -euo pipefail
 [[ "${1:-}" == rand && "${2:-}" == -hex ]]
 case "${3:-}" in
   4)
-    printf 'deadbeef\n'
+    count=0
+    [[ ! -f "${FAKE_OPENSSL_COUNTER}" ]] || IFS= read -r count <"${FAKE_OPENSSL_COUNTER}"
+    printf '%08x\n' "$((0xdead0000 + count))"
     ;;
   7)
     count=0
