@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Smart Cover Connect backup daily
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 UTC
+Persistent=true
+RandomizedDelaySec=30m
+AccuracySec=1m
+Unit=scc-backup.service
+
+[Install]
+WantedBy=timers.target

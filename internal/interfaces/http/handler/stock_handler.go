@@ -28,8 +28,16 @@ func NewStockHandler(svc *coverApp.Service, officeRepo user.OfficeRepository) *S
 func (h *StockHandler) List(w http.ResponseWriter, r *http.Request) {
 	role := middleware.GetRoleFromCtx(r.Context())
 	officeID := middleware.GetOfficeIDFromCtx(r.Context())
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return
+	}
 
-	if role != user.RoleAdmin && officeID != nil {
+	if role != user.RoleAdmin {
+		if officeID == nil || *officeID == "" {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user has no office")
+			return
+		}
 		summary, err := h.summaryWithOffice(r.Context(), *officeID, stockInstallDate(r))
 		if err != nil {
 			response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
@@ -63,6 +71,10 @@ func (h *StockHandler) GetByOffice(w http.ResponseWriter, r *http.Request) {
 
 	role := middleware.GetRoleFromCtx(r.Context())
 	ctxOfficeID := middleware.GetOfficeIDFromCtx(r.Context())
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return
+	}
 	if role != user.RoleAdmin && (ctxOfficeID == nil || *ctxOfficeID != officeID) {
 		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access stock for another office")
 		return

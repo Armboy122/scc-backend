@@ -26,8 +26,11 @@ func TestStockListIncludesOfficeForAdminRows(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/stock", nil)
+	secret := "test-secret"
+	token := signTestAccessToken(t, secret, "admin", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 
-	h.List(rec, req)
+	middleware.Authenticator(auth.NewService(nil, nil, secret, time.Minute, time.Hour))(http.HandlerFunc(h.List)).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	var body struct {
@@ -152,7 +155,8 @@ func (r *fakeOfficeRepo) Create(ctx context.Context, office *user.Office) error 
 }
 
 type fakeCoverRepo struct {
-	inStock map[string]int64
+	inStock       map[string]int64
+	retirementErr error
 }
 
 func (r *fakeCoverRepo) FindByID(ctx context.Context, id string) (*coverDomain.Cover, error) {
@@ -164,6 +168,9 @@ func (r *fakeCoverRepo) FindByCode(ctx context.Context, code string) (*coverDoma
 func (r *fakeCoverRepo) Create(ctx context.Context, c *coverDomain.Cover) error     { return nil }
 func (r *fakeCoverRepo) Update(ctx context.Context, c *coverDomain.Cover) error     { return nil }
 func (r *fakeCoverRepo) Retire(ctx context.Context, id string, reason string) error { return nil }
+func (r *fakeCoverRepo) RetireWithCapacityGuard(ctx context.Context, id string, reason string) error {
+	return r.retirementErr
+}
 func (r *fakeCoverRepo) CountByOfficeAndStatus(ctx context.Context, officeID string, status coverDomain.CoverStatus) (int64, error) {
 	if status == coverDomain.StatusInStock {
 		return r.inStock[officeID], nil
@@ -174,6 +181,9 @@ func (r *fakeCoverRepo) CountOnLoanOut(ctx context.Context, officeID string) (in
 	return 0, nil
 }
 func (r *fakeCoverRepo) CountOnLoanIn(ctx context.Context, officeID string) (int64, error) {
+	return 0, nil
+}
+func (r *fakeCoverRepo) CountReservedBorrowByOffice(ctx context.Context, officeID string) (int64, error) {
 	return 0, nil
 }
 func (r *fakeCoverRepo) ListByOffice(ctx context.Context, filter coverDomain.CoverFilter) ([]*coverDomain.Cover, int64, error) {

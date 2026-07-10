@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,34 +9,105 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	woApp "github.com/smartcover/backend/internal/application/workorder"
+	evidenceDomain "github.com/smartcover/backend/internal/domain/evidence"
 	"github.com/smartcover/backend/internal/domain/user"
 	woDomain "github.com/smartcover/backend/internal/domain/workorder"
 	"github.com/smartcover/backend/internal/interfaces/http/middleware"
 	"github.com/smartcover/backend/internal/interfaces/http/response"
 )
 
+type jsonField[T any] struct {
+	Present bool
+	Null    bool
+	Value   T
+}
+
+func (f *jsonField[T]) UnmarshalJSON(data []byte) error {
+	f.Present = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		f.Null = true
+		var zero T
+		f.Value = zero
+		return nil
+	}
+	return json.Unmarshal(data, &f.Value)
+}
+
 // WorkOrderHandler handles work order endpoints.
 type WorkOrderHandler struct {
-	svc *woApp.Service
+	svc        *woApp.Service
+	officeRepo user.OfficeRepository
 }
 
 // NewWorkOrderHandler creates a new WorkOrderHandler.
-func NewWorkOrderHandler(svc *woApp.Service) *WorkOrderHandler {
-	return &WorkOrderHandler{svc: svc}
+func NewWorkOrderHandler(svc *woApp.Service, officeRepo ...user.OfficeRepository) *WorkOrderHandler {
+	var repo user.OfficeRepository
+	if len(officeRepo) > 0 {
+		repo = officeRepo[0]
+	}
+	return &WorkOrderHandler{svc: svc, officeRepo: repo}
 }
 
-func defaultCreateAssignee(role user.Role, userID string, requested *string) *string {
-	if requested != nil {
-		return requested
+func resolveCreateAssignee(role user.Role, userID string, requested *string) (*string, error) {
+	if !role.IsValid() {
+		return nil, errors.New("invalid user role")
 	}
 	if role == user.RoleTech {
-		return &userID
+		if userID == "" {
+			return nil, errors.New("technician identity is missing")
+		}
+		if requested != nil && *requested != "" && *requested != userID {
+			return nil, errors.New("technicians cannot assign a work order to another user")
+		}
+		return &userID, nil
 	}
-	return nil
+	return requested, nil
+}
+
+func resolveWorkOrderOffice(role user.Role, claimedOfficeID *string, requested string) (string, error) {
+	if !role.IsValid() {
+		return "", errors.New("invalid user role")
+	}
+	if role == user.RoleAdmin {
+		if requested == "" {
+			return "", errors.New("officeId is required")
+		}
+		return requested, nil
+	}
+	if claimedOfficeID == nil || *claimedOfficeID == "" {
+		return "", errors.New("user has no office")
+	}
+	if requested != *claimedOfficeID {
+		return "", errors.New("cannot create a work order for another office")
+	}
+	return *claimedOfficeID, nil
 }
 
 func canCancelWorkOrderRole(role user.Role) bool {
-	return role == user.RoleExec
+	return role == user.RoleAdmin || role == user.RoleExec
+}
+
+func canManageWorkOrderRole(role user.Role) bool {
+	return role == user.RoleAdmin || role == user.RoleExec
+}
+
+func fieldMutationAllowed(role user.Role, userID string, officeID *string, wo *woDomain.WorkOrder) bool {
+	if role == user.RoleAdmin {
+		return true
+	}
+	return role == user.RoleTech && userID != "" && officeID != nil && *officeID != "" &&
+		wo != nil && wo.OfficeID == *officeID && wo.AssignedToID != nil && *wo.AssignedToID == userID
+}
+
+func parseRequiredWorkOrderDate(field string, raw *string) (*time.Time, error) {
+	if raw == nil || *raw == "" {
+		return nil, errors.New(field + " is required")
+	}
+	parsed, err := time.Parse(time.RFC3339, *raw)
+	if err != nil {
+		return nil, errors.New(field + " must be an RFC3339 timestamp")
+	}
+	return &parsed, nil
 }
 
 func (h *WorkOrderHandler) respondWorkOrder(w http.ResponseWriter, r *http.Request, id string) {
@@ -58,15 +130,40 @@ func (h *WorkOrderHandler) List(w http.ResponseWriter, r *http.Request) {
 	role := middleware.GetRoleFromCtx(r.Context())
 	officeID := middleware.GetOfficeIDFromCtx(r.Context())
 	userID := middleware.GetUserIDFromCtx(r.Context())
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return
+	}
 
-	if role != user.RoleAdmin && officeID != nil {
+	if role != user.RoleAdmin {
+		if officeID == nil || *officeID == "" {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user has no office")
+			return
+		}
+		if requested := q.Get("officeId"); requested != "" && requested != *officeID {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access work orders for another office")
+			return
+		}
 		filter.OfficeID = officeID
+		if role == user.RoleTech {
+			if userID == "" {
+				response.Error(w, http.StatusForbidden, "FORBIDDEN", "technician identity is missing")
+				return
+			}
+			// Technicians may only read work orders explicitly assigned to them;
+			// the optional mine query cannot widen that scope.
+			filter.AssignedToID = &userID
+		}
 	} else if q.Get("officeId") != "" {
 		oid := q.Get("officeId")
 		filter.OfficeID = &oid
 	}
 
-	if q.Get("mine") == "true" {
+	if role != user.RoleTech && q.Get("mine") == "true" {
+		if userID == "" {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user identity is missing")
+			return
+		}
 		filter.AssignedToID = &userID
 	}
 	if s := q.Get("status"); s != "" {
@@ -122,40 +219,52 @@ func (h *WorkOrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId and customerName are required")
 		return
 	}
+	installDate, err := parseRequiredWorkOrderDate("installDate", req.InstallDate)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
+	removalDate, err := parseRequiredWorkOrderDate("removalDate", req.RemovalDate)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		return
+	}
 
-	userID := middleware.GetUserIDFromCtx(r.Context())
 	role := middleware.GetRoleFromCtx(r.Context())
+	userID := middleware.GetUserIDFromCtx(r.Context())
 	ctxOfficeID := middleware.GetOfficeIDFromCtx(r.Context())
-	if role != user.RoleAdmin {
-		if ctxOfficeID == nil {
-			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user has no office")
-			return
-		}
-		req.OfficeID = *ctxOfficeID
+	resolvedOfficeID, err := resolveWorkOrderOffice(role, ctxOfficeID, req.OfficeID)
+	if err != nil {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
+	}
+	exists, err := targetOfficeExists(r.Context(), h.officeRepo, resolvedOfficeID)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	if !exists {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId does not exist")
+		return
+	}
+	assignedToID, err := resolveCreateAssignee(role, userID, req.AssignedToID)
+	if err != nil {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", err.Error())
+		return
 	}
 
 	params := woApp.CreateParams{
-		OfficeID:      req.OfficeID,
+		OfficeID:      resolvedOfficeID,
 		CustomerName:  req.CustomerName,
 		CustomerPhone: req.CustomerPhone,
 		Note:          req.Note,
 		GpsLat:        req.GpsLat,
 		GpsLng:        req.GpsLng,
 		PlannedQty:    req.PlannedQty,
+		InstallDate:   installDate,
+		RemovalDate:   removalDate,
 		CreatedByID:   userID,
-		AssignedToID:  defaultCreateAssignee(role, userID, req.AssignedToID),
-	}
-	if req.InstallDate != nil {
-		t, err := time.Parse(time.RFC3339, *req.InstallDate)
-		if err == nil {
-			params.InstallDate = &t
-		}
-	}
-	if req.RemovalDate != nil {
-		t, err := time.Parse(time.RFC3339, *req.RemovalDate)
-		if err == nil {
-			params.RemovalDate = &t
-		}
+		AssignedToID:  assignedToID,
 	}
 
 	wo, err := h.svc.Create(r.Context(), params)
@@ -172,41 +281,88 @@ func (h *WorkOrderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if !h.canAccessWorkOrder(w, r, id) {
 		return
 	}
+	if !canManageWorkOrderRole(middleware.GetRoleFromCtx(r.Context())) {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "only executives or administrators can update work orders")
+		return
+	}
 	var req struct {
-		CustomerName  string   `json:"customerName"`
-		CustomerPhone *string  `json:"customerPhone"`
-		Note          *string  `json:"note"`
-		GpsLat        *float64 `json:"gpsLat"`
-		GpsLng        *float64 `json:"gpsLng"`
-		PlannedQty    *int     `json:"plannedQty"`
-		InstallDate   *string  `json:"installDate"`
-		RemovalDate   *string  `json:"removalDate"`
-		AssignedToID  *string  `json:"assignedToId"`
+		CustomerName  jsonField[string]  `json:"customerName"`
+		CustomerPhone jsonField[string]  `json:"customerPhone"`
+		Note          jsonField[string]  `json:"note"`
+		GpsLat        jsonField[float64] `json:"gpsLat"`
+		GpsLng        jsonField[float64] `json:"gpsLng"`
+		PlannedQty    jsonField[int]     `json:"plannedQty"`
+		InstallDate   jsonField[string]  `json:"installDate"`
+		RemovalDate   jsonField[string]  `json:"removalDate"`
+		AssignedToID  jsonField[string]  `json:"assignedToId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
 		return
 	}
-	params := woApp.CreateParams{
-		CustomerName:  req.CustomerName,
-		CustomerPhone: req.CustomerPhone,
-		Note:          req.Note,
-		GpsLat:        req.GpsLat,
-		GpsLng:        req.GpsLng,
-		PlannedQty:    req.PlannedQty,
-		AssignedToID:  req.AssignedToID,
+	params := woApp.UpdateParams{
+		CustomerPhoneSet: req.CustomerPhone.Present,
+		NoteSet:          req.Note.Present,
+		GpsLatSet:        req.GpsLat.Present,
+		GpsLngSet:        req.GpsLng.Present,
+		AssignedToIDSet:  req.AssignedToID.Present,
 	}
-	if req.InstallDate != nil {
-		t, err := time.Parse(time.RFC3339, *req.InstallDate)
-		if err == nil {
-			params.InstallDate = &t
+	if req.CustomerName.Present {
+		if req.CustomerName.Null || req.CustomerName.Value == "" {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "customerName cannot be null or empty")
+			return
 		}
+		params.CustomerName = &req.CustomerName.Value
 	}
-	if req.RemovalDate != nil {
-		t, err := time.Parse(time.RFC3339, *req.RemovalDate)
-		if err == nil {
-			params.RemovalDate = &t
+	if req.CustomerPhone.Present && !req.CustomerPhone.Null {
+		params.CustomerPhone = &req.CustomerPhone.Value
+	}
+	if req.Note.Present && !req.Note.Null {
+		params.Note = &req.Note.Value
+	}
+	if req.GpsLat.Present && !req.GpsLat.Null {
+		params.GpsLat = &req.GpsLat.Value
+	}
+	if req.GpsLng.Present && !req.GpsLng.Null {
+		params.GpsLng = &req.GpsLng.Value
+	}
+	if req.PlannedQty.Present {
+		if req.PlannedQty.Null || req.PlannedQty.Value < 1 {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "plannedQty must be at least 1")
+			return
 		}
+		params.PlannedQty = &req.PlannedQty.Value
+	}
+	if req.InstallDate.Present {
+		if req.InstallDate.Null {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "installDate cannot be null")
+			return
+		}
+		installDate, err := parseRequiredWorkOrderDate("installDate", &req.InstallDate.Value)
+		if err != nil {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
+		params.InstallDate = installDate
+	}
+	if req.RemovalDate.Present {
+		if req.RemovalDate.Null {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "removalDate cannot be null")
+			return
+		}
+		removalDate, err := parseRequiredWorkOrderDate("removalDate", &req.RemovalDate.Value)
+		if err != nil {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
+		params.RemovalDate = removalDate
+	}
+	if req.AssignedToID.Present && !req.AssignedToID.Null {
+		if req.AssignedToID.Value == "" {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "assignedToId cannot be empty")
+			return
+		}
+		params.AssignedToID = &req.AssignedToID.Value
 	}
 	wo, err := h.svc.UpdateScheduled(r.Context(), id, params)
 	if err != nil {
@@ -219,17 +375,13 @@ func (h *WorkOrderHandler) Update(w http.ResponseWriter, r *http.Request) {
 // Start handles POST /workorders/:id/start.
 func (h *WorkOrderHandler) Start(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !h.canAccessWorkOrder(w, r, id) {
-		return
-	}
 	var req struct {
 		GpsLat *float64 `json:"gpsLat"`
 		GpsLng *float64 `json:"gpsLng"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	userID := middleware.GetUserIDFromCtx(r.Context())
-	if err := h.svc.Start(r.Context(), id, userID, req.GpsLat, req.GpsLng); err != nil {
+	if err := h.svc.StartAs(r.Context(), evidenceActorFromRequest(r), id, req.GpsLat, req.GpsLng); err != nil {
 		h.handleWOError(w, err)
 		return
 	}
@@ -243,7 +395,7 @@ func (h *WorkOrderHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canCancelWorkOrderRole(middleware.GetRoleFromCtx(r.Context())) {
-		response.Error(w, http.StatusForbidden, "FORBIDDEN", "only executives can cancel work orders")
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "only executives or administrators can cancel work orders")
 		return
 	}
 	var req struct {
@@ -264,6 +416,10 @@ func (h *WorkOrderHandler) Assign(w http.ResponseWriter, r *http.Request) {
 	if !h.canAccessWorkOrder(w, r, id) {
 		return
 	}
+	if !canManageWorkOrderRole(middleware.GetRoleFromCtx(r.Context())) {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "only executives or administrators can assign work orders")
+		return
+	}
 	var req struct {
 		AssignedToID string `json:"assignedToId"`
 	}
@@ -281,9 +437,6 @@ func (h *WorkOrderHandler) Assign(w http.ResponseWriter, r *http.Request) {
 // ScanInstall handles POST /workorders/:id/scan-install.
 func (h *WorkOrderHandler) ScanInstall(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !h.canAccessWorkOrder(w, r, id) {
-		return
-	}
 	var req struct {
 		CoverCode string `json:"coverCode"`
 	}
@@ -292,7 +445,7 @@ func (h *WorkOrderHandler) ScanInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := h.svc.ScanInstall(r.Context(), id, req.CoverCode)
+	c, err := h.svc.ScanInstallAs(r.Context(), evidenceActorFromRequest(r), id, req.CoverCode)
 	if err != nil {
 		h.handleWOError(w, err)
 		return
@@ -304,11 +457,8 @@ func (h *WorkOrderHandler) ScanInstall(w http.ResponseWriter, r *http.Request) {
 func (h *WorkOrderHandler) UnscanInstall(w http.ResponseWriter, r *http.Request) {
 	woID := chi.URLParam(r, "id")
 	coverID := chi.URLParam(r, "coverId")
-	if !h.canAccessWorkOrder(w, r, woID) {
-		return
-	}
 
-	if err := h.svc.UnscanInstall(r.Context(), woID, coverID); err != nil {
+	if err := h.svc.UnscanInstallAs(r.Context(), evidenceActorFromRequest(r), woID, coverID); err != nil {
 		h.handleWOError(w, err)
 		return
 	}
@@ -318,11 +468,8 @@ func (h *WorkOrderHandler) UnscanInstall(w http.ResponseWriter, r *http.Request)
 // SubmitInstall handles POST /workorders/:id/submit-install.
 func (h *WorkOrderHandler) SubmitInstall(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !h.canAccessWorkOrder(w, r, id) {
-		return
-	}
 
-	if err := h.svc.SubmitInstall(r.Context(), id); err != nil {
+	if err := h.svc.SubmitInstallAs(r.Context(), evidenceActorFromRequest(r), id); err != nil {
 		h.handleWOError(w, err)
 		return
 	}
@@ -331,16 +478,13 @@ func (h *WorkOrderHandler) SubmitInstall(w http.ResponseWriter, r *http.Request)
 
 // PhotoInstall handles POST /workorders/:id/installations/:coverId/photo.
 func (h *WorkOrderHandler) PhotoInstall(w http.ResponseWriter, r *http.Request) {
-	h.updatePhoto(w, r, "install")
+	h.updatePhoto(w, r, evidenceDomain.KindInstall)
 }
 
 // StartRemoval handles POST /workorders/:id/start-removal.
 func (h *WorkOrderHandler) StartRemoval(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !h.canAccessWorkOrder(w, r, id) {
-		return
-	}
-	if err := h.svc.StartRemoval(r.Context(), id); err != nil {
+	if err := h.svc.StartRemovalAs(r.Context(), evidenceActorFromRequest(r), id); err != nil {
 		h.handleWOError(w, err)
 		return
 	}
@@ -350,9 +494,6 @@ func (h *WorkOrderHandler) StartRemoval(w http.ResponseWriter, r *http.Request) 
 // ScanRemove handles POST /workorders/:id/scan-remove.
 func (h *WorkOrderHandler) ScanRemove(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !h.canAccessWorkOrder(w, r, id) {
-		return
-	}
 	var req struct {
 		CoverCode string `json:"coverCode"`
 	}
@@ -361,7 +502,7 @@ func (h *WorkOrderHandler) ScanRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := h.svc.ScanRemove(r.Context(), id, req.CoverCode)
+	c, err := h.svc.ScanRemoveAs(r.Context(), evidenceActorFromRequest(r), id, req.CoverCode)
 	if err != nil {
 		h.handleWOError(w, err)
 		return
@@ -371,44 +512,104 @@ func (h *WorkOrderHandler) ScanRemove(w http.ResponseWriter, r *http.Request) {
 
 // PhotoRemove handles POST /workorders/:id/installations/:coverId/photo-remove.
 func (h *WorkOrderHandler) PhotoRemove(w http.ResponseWriter, r *http.Request) {
-	h.updatePhoto(w, r, "remove")
+	h.updatePhoto(w, r, evidenceDomain.KindRemove)
 }
 
 // CompleteRemoval handles POST /workorders/:id/complete-removal.
 func (h *WorkOrderHandler) CompleteRemoval(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if !h.canAccessWorkOrder(w, r, id) {
-		return
-	}
-	if err := h.svc.CompleteRemoval(r.Context(), id); err != nil {
+	if err := h.svc.CompleteRemovalAs(r.Context(), evidenceActorFromRequest(r), id); err != nil {
 		h.handleWOError(w, err)
 		return
 	}
 	h.respondWorkOrder(w, r, id)
 }
 
-func (h *WorkOrderHandler) updatePhoto(w http.ResponseWriter, r *http.Request, kind string) {
+func (h *WorkOrderHandler) updatePhoto(w http.ResponseWriter, r *http.Request, kind evidenceDomain.Kind) {
 	id := chi.URLParam(r, "id")
-	if !h.canAccessWorkOrder(w, r, id) {
-		return
-	}
 	coverID := chi.URLParam(r, "coverId")
 	var req struct {
-		FileURL string `json:"fileUrl"`
+		ObjectKey string `json:"objectKey"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.FileURL == "" {
-		response.Error(w, http.StatusBadRequest, "VALIDATION", "fileUrl is required")
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil || req.ObjectKey == "" {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "objectKey is required")
 		return
 	}
-	if err := h.svc.UpdatePhoto(r.Context(), id, coverID, kind, req.FileURL); err != nil {
+	if err := h.svc.AttachEvidence(
+		r.Context(), evidenceActorFromRequest(r), kind, id, coverID, req.ObjectKey,
+	); err != nil {
 		h.handleWOError(w, err)
 		return
 	}
 	response.NoContent(w)
 }
 
+// EvidenceRead handles an authenticated short-lived read URL for one exact
+// installation evidence kind. It never returns the opaque object key.
+func (h *WorkOrderHandler) EvidenceRead(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	coverID := chi.URLParam(r, "coverId")
+	kind := evidenceDomain.Kind(chi.URLParam(r, "kind"))
+	readURL, err := h.svc.PresignEvidenceRead(
+		r.Context(), evidenceActorFromRequest(r), kind, id, coverID,
+	)
+	if err != nil {
+		h.handleWOError(w, err)
+		return
+	}
+	response.JSON(w, http.StatusOK, map[string]interface{}{
+		"readUrl":          readURL,
+		"expiresInSeconds": int(evidenceDomain.SignedReadTTL.Seconds()),
+	})
+}
+
+func evidenceActorFromRequest(r *http.Request) woApp.EvidenceActor {
+	return woApp.EvidenceActor{
+		UserID:   middleware.GetUserIDFromCtx(r.Context()),
+		Role:     middleware.GetRoleFromCtx(r.Context()),
+		OfficeID: middleware.GetOfficeIDFromCtx(r.Context()),
+	}
+}
+
+func (h *WorkOrderHandler) authorizeFieldMutation(w http.ResponseWriter, r *http.Request, id string) bool {
+	role := middleware.GetRoleFromCtx(r.Context())
+	if role == user.RoleAdmin {
+		return true
+	}
+	if role != user.RoleTech {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "field work requires the assigned technician or an administrator")
+		return false
+	}
+	officeID := middleware.GetOfficeIDFromCtx(r.Context())
+	userID := middleware.GetUserIDFromCtx(r.Context())
+	if officeID == nil || *officeID == "" || userID == "" {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "technician identity or office is missing")
+		return false
+	}
+	wo, err := h.svc.GetByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, woApp.ErrNotFound) {
+			response.Error(w, http.StatusNotFound, "NOT_FOUND", "work order not found")
+			return false
+		}
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return false
+	}
+	if !fieldMutationAllowed(role, userID, officeID, wo) {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "work order is not assigned to this technician")
+		return false
+	}
+	return true
+}
+
 func (h *WorkOrderHandler) canAccessWorkOrder(w http.ResponseWriter, r *http.Request, id string) bool {
 	role := middleware.GetRoleFromCtx(r.Context())
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return false
+	}
 	if role == user.RoleAdmin {
 		return true
 	}
@@ -430,11 +631,30 @@ func (h *WorkOrderHandler) canAccessWorkOrder(w http.ResponseWriter, r *http.Req
 		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access work order for another office")
 		return false
 	}
+	if role == user.RoleTech {
+		userID := middleware.GetUserIDFromCtx(r.Context())
+		if userID == "" || wo.AssignedToID == nil || *wo.AssignedToID != userID {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "work order is not assigned to this technician")
+			return false
+		}
+	}
 	return true
 }
 
 func (h *WorkOrderHandler) handleWOError(w http.ResponseWriter, err error) {
+	handleWorkOrderError(w, err)
+}
+
+func handleWorkOrderError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, woApp.ErrForbidden):
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "insufficient permissions for this work order operation")
+	case errors.Is(err, woApp.ErrEvidenceRequired):
+		response.Error(w, http.StatusUnprocessableEntity, "EVIDENCE_REQUIRED", err.Error())
+	case errors.Is(err, woApp.ErrEvidenceInvalid):
+		response.Error(w, http.StatusUnprocessableEntity, "EVIDENCE_INVALID", err.Error())
+	case errors.Is(err, woApp.ErrEvidenceUnavailable):
+		response.Error(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "evidence storage is temporarily unavailable")
 	case errors.Is(err, woApp.ErrNotFound):
 		response.Error(w, http.StatusNotFound, "NOT_FOUND", "work order not found")
 	case errors.Is(err, woApp.ErrStateInvalid):
@@ -443,6 +663,8 @@ func (h *WorkOrderHandler) handleWOError(w http.ResponseWriter, err error) {
 		response.Error(w, http.StatusConflict, "CONFLICT", err.Error())
 	case errors.Is(err, woApp.ErrInsufficientStock):
 		response.Error(w, http.StatusConflict, "INSUFFICIENT_STOCK", err.Error())
+	case errors.Is(err, woApp.ErrValidation):
+		response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
 	case errors.Is(err, woDomain.ErrInvalidTransition):
 		response.Error(w, http.StatusConflict, "STATE_INVALID", err.Error())
 	default:

@@ -122,9 +122,11 @@ type BorrowModel struct {
 	Status           string `gorm:"not null;default:'REQUESTED';index"`
 	RequestedQty     int    `gorm:"not null"`
 	Note             *string
-	ReturnDate       *time.Time `gorm:"index"`
-	CreatedByID      string     `gorm:"not null;type:varchar(36);index"`
-	ApprovedByID     *string    `gorm:"type:varchar(36)"`
+	ReturnDate       time.Time `gorm:"not null;index"`
+	CreatedByID      string    `gorm:"not null;type:varchar(36);index"`
+	ApprovedByID     *string   `gorm:"type:varchar(36)"`
+	ActivatedByID    *string   `gorm:"type:varchar(36)"`
+	ReturnedByID     *string   `gorm:"type:varchar(36)"`
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	ActivatedAt      *time.Time
@@ -135,24 +137,93 @@ func (BorrowModel) TableName() string { return "borrows" }
 
 // BorrowCoverModel is the GORM model for BorrowCover.
 type BorrowCoverModel struct {
-	ID        string `gorm:"primaryKey;type:varchar(36)"`
-	BorrowID  string `gorm:"not null;type:varchar(36);index;uniqueIndex:idx_borrow_cover"`
-	CoverID   string `gorm:"not null;type:varchar(36);index;uniqueIndex:idx_borrow_cover"`
-	CreatedAt time.Time
+	ID         string     `gorm:"primaryKey;type:varchar(36)"`
+	BorrowID   string     `gorm:"not null;type:varchar(36);index;uniqueIndex:idx_borrow_cover"`
+	CoverID    string     `gorm:"not null;type:varchar(36);index;uniqueIndex:idx_borrow_cover"`
+	ReleasedAt *time.Time `gorm:"index"`
+	CreatedAt  time.Time
 }
 
 func (BorrowCoverModel) TableName() string { return "borrow_covers" }
 
+// BorrowAuditModel is the immutable audit history for borrow lifecycle changes.
+type BorrowAuditModel struct {
+	ID         string `gorm:"primaryKey;type:varchar(36)"`
+	BorrowID   string `gorm:"not null;type:varchar(36);index"`
+	Action     string `gorm:"not null"`
+	FromStatus *string
+	ToStatus   string  `gorm:"not null"`
+	ActorID    *string `gorm:"type:varchar(36);index"`
+	ActorRole  string  `gorm:"not null"`
+	Reason     *string
+	CreatedAt  time.Time `gorm:"not null;index"`
+}
+
+func (BorrowAuditModel) TableName() string { return "borrow_audit_events" }
+
+// BorrowNotificationOutboxModel keeps notification intent durable when
+// presentation delivery is temporarily unavailable.
+type BorrowNotificationOutboxModel struct {
+	ID               string     `gorm:"primaryKey;type:varchar(36)"`
+	BorrowID         string     `gorm:"not null;type:varchar(36);index"`
+	RecipientUserID  string     `gorm:"not null;type:varchar(36);index"`
+	NotificationType string     `gorm:"not null"`
+	Message          string     `gorm:"not null"`
+	DedupKey         string     `gorm:"not null;type:varchar(255);uniqueIndex"`
+	ProcessedAt      *time.Time `gorm:"index"`
+	CreatedAt        time.Time  `gorm:"not null;index"`
+}
+
+func (BorrowNotificationOutboxModel) TableName() string { return "borrow_notification_outbox" }
+
+// DiscrepancyModel is an audited observation and never mutates stock by itself.
+type DiscrepancyModel struct {
+	ID             string `gorm:"primaryKey;type:varchar(36)"`
+	OfficeID       string `gorm:"not null;type:varchar(36);index:idx_discrepancy_office_status"`
+	Type           string `gorm:"not null;index"`
+	Status         string `gorm:"not null;default:'OPEN';index:idx_discrepancy_office_status"`
+	Reason         string `gorm:"not null;type:varchar(1000)"`
+	ExpectedQty    *int
+	ObservedQty    *int
+	CoverID        *string `gorm:"type:varchar(36);index"`
+	WorkOrderID    *string `gorm:"type:varchar(36);index"`
+	BorrowID       *string `gorm:"type:varchar(36);index"`
+	ReportedByID   *string `gorm:"type:varchar(36);index"`
+	ResolvedByID   *string `gorm:"type:varchar(36)"`
+	ResolutionNote *string `gorm:"type:varchar(1000)"`
+	DedupKey       *string `gorm:"type:varchar(255);uniqueIndex"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	ResolvedAt     *time.Time
+}
+
+func (DiscrepancyModel) TableName() string { return "discrepancies" }
+
+// DiscrepancyAuditModel is the immutable report/resolve history.
+type DiscrepancyAuditModel struct {
+	ID            string  `gorm:"primaryKey;type:varchar(36)"`
+	DiscrepancyID string  `gorm:"not null;type:varchar(36);index"`
+	Action        string  `gorm:"not null"`
+	ActorID       *string `gorm:"type:varchar(36);index"`
+	ActorRole     string  `gorm:"not null"`
+	Note          string  `gorm:"not null;type:varchar(1000)"`
+	CreatedAt     time.Time
+}
+
+func (DiscrepancyAuditModel) TableName() string { return "discrepancy_audit_events" }
+
 // NotificationModel is the GORM model for Notification.
 type NotificationModel struct {
-	ID          string     `gorm:"primaryKey;type:varchar(36)"`
-	UserID      string     `gorm:"not null;type:varchar(36);index:idx_notif_user_read"`
-	Type        string     `gorm:"not null"`
-	Message     string     `gorm:"not null"`
-	WorkOrderID *string    `gorm:"type:varchar(36)"`
-	BorrowID    *string    `gorm:"type:varchar(36)"`
-	ReadAt      *time.Time `gorm:"index:idx_notif_user_read"`
-	CreatedAt   time.Time
+	ID            string     `gorm:"primaryKey;type:varchar(36)"`
+	UserID        string     `gorm:"not null;type:varchar(36);index:idx_notif_user_read"`
+	Type          string     `gorm:"not null"`
+	Message       string     `gorm:"not null"`
+	WorkOrderID   *string    `gorm:"type:varchar(36)"`
+	BorrowID      *string    `gorm:"type:varchar(36)"`
+	DiscrepancyID *string    `gorm:"type:varchar(36)"`
+	DedupKey      *string    `gorm:"type:varchar(255)"`
+	ReadAt        *time.Time `gorm:"index:idx_notif_user_read"`
+	CreatedAt     time.Time
 }
 
 func (NotificationModel) TableName() string { return "notifications" }
@@ -282,57 +353,23 @@ func fromWorkOrderDomain(wo *workorder.WorkOrder) *WorkOrderModel {
 	}
 }
 
-func toBorrowDomain(m *BorrowModel) *borrow.Borrow {
-	return &borrow.Borrow{
-		ID:               m.ID,
-		BorrowerOfficeID: m.BorrowerOfficeID,
-		LenderOfficeID:   m.LenderOfficeID,
-		Status:           borrow.BorrowStatus(m.Status),
-		RequestedQty:     m.RequestedQty,
-		Note:             m.Note,
-		ReturnDate:       m.ReturnDate,
-		CreatedByID:      m.CreatedByID,
-		ApprovedByID:     m.ApprovedByID,
-		CreatedAt:        m.CreatedAt,
-		UpdatedAt:        m.UpdatedAt,
-		ActivatedAt:      m.ActivatedAt,
-		ReturnedAt:       m.ReturnedAt,
-	}
-}
-
-func fromBorrowDomain(b *borrow.Borrow) *BorrowModel {
-	return &BorrowModel{
-		ID:               b.ID,
-		BorrowerOfficeID: b.BorrowerOfficeID,
-		LenderOfficeID:   b.LenderOfficeID,
-		Status:           string(b.Status),
-		RequestedQty:     b.RequestedQty,
-		Note:             b.Note,
-		ReturnDate:       b.ReturnDate,
-		CreatedByID:      b.CreatedByID,
-		ApprovedByID:     b.ApprovedByID,
-		CreatedAt:        b.CreatedAt,
-		UpdatedAt:        b.UpdatedAt,
-		ActivatedAt:      b.ActivatedAt,
-		ReturnedAt:       b.ReturnedAt,
-	}
-}
-
 func toBorrowCoverDomain(m *BorrowCoverModel) *borrow.BorrowCover {
 	return &borrow.BorrowCover{
-		ID:        m.ID,
-		BorrowID:  m.BorrowID,
-		CoverID:   m.CoverID,
-		CreatedAt: m.CreatedAt,
+		ID:         m.ID,
+		BorrowID:   m.BorrowID,
+		CoverID:    m.CoverID,
+		ReleasedAt: m.ReleasedAt,
+		CreatedAt:  m.CreatedAt,
 	}
 }
 
 func fromBorrowCoverDomain(bc *borrow.BorrowCover) *BorrowCoverModel {
 	return &BorrowCoverModel{
-		ID:        bc.ID,
-		BorrowID:  bc.BorrowID,
-		CoverID:   bc.CoverID,
-		CreatedAt: bc.CreatedAt,
+		ID:         bc.ID,
+		BorrowID:   bc.BorrowID,
+		CoverID:    bc.CoverID,
+		ReleasedAt: bc.ReleasedAt,
+		CreatedAt:  bc.CreatedAt,
 	}
 }
 
@@ -370,14 +407,16 @@ func fromInstallationDomain(i *workorder.Installation) *InstallationModel {
 
 func toNotificationDomain(m *NotificationModel) *notification.Notification {
 	return &notification.Notification{
-		ID:          m.ID,
-		UserID:      m.UserID,
-		Type:        notification.NotificationType(m.Type),
-		Message:     m.Message,
-		WorkOrderID: m.WorkOrderID,
-		BorrowID:    m.BorrowID,
-		ReadAt:      m.ReadAt,
-		CreatedAt:   m.CreatedAt,
+		ID:            m.ID,
+		UserID:        m.UserID,
+		Type:          notification.NotificationType(m.Type),
+		Message:       m.Message,
+		WorkOrderID:   m.WorkOrderID,
+		BorrowID:      m.BorrowID,
+		DiscrepancyID: m.DiscrepancyID,
+		DedupKey:      m.DedupKey,
+		ReadAt:        m.ReadAt,
+		CreatedAt:     m.CreatedAt,
 	}
 }
 

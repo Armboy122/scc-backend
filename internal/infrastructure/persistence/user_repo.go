@@ -78,6 +78,22 @@ func (r *GormUserRepo) List(ctx context.Context, filter user.UserFilter) ([]*use
 	return result, total, nil
 }
 
+// ListActiveTechniciansByOffice returns the minimal deterministic projection
+// required by a work-order assignment picker.
+func (r *GormUserRepo) ListActiveTechniciansByOffice(ctx context.Context, officeID string) ([]user.TechnicianOption, error) {
+	result := make([]user.TechnicianOption, 0)
+	err := r.db.WithContext(ctx).Table("users").
+		Select("id", "name", "office_id").
+		Where("office_id = ? AND role = ? AND is_active = ?", officeID, string(user.RoleTech), true).
+		Order("name ASC").
+		Order("id ASC").
+		Scan(&result).Error
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func normalise(page, limit int) (int, int) {
 	if page < 1 {
 		page = 1

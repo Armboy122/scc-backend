@@ -5,6 +5,7 @@ import (
 
 	"github.com/smartcover/backend/internal/domain/notification"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GormNotificationRepo implements notification.NotificationRepository using GORM.
@@ -16,17 +17,30 @@ func NewGormNotificationRepo(db *gorm.DB) *GormNotificationRepo {
 }
 
 func (r *GormNotificationRepo) Create(ctx context.Context, n *notification.Notification) error {
+	return r.CreateTx(ctx, r.db, n)
+}
+
+// CreateTx persists a notification using the caller's transaction. Work-order
+// assignment mutations use this to commit the assignment and notification as a
+// single unit.
+func (r *GormNotificationRepo) CreateTx(ctx context.Context, tx *gorm.DB, n *notification.Notification) error {
 	m := &NotificationModel{
-		ID:          n.ID,
-		UserID:      n.UserID,
-		Type:        string(n.Type),
-		Message:     n.Message,
-		WorkOrderID: n.WorkOrderID,
-		BorrowID:    n.BorrowID,
-		ReadAt:      n.ReadAt,
-		CreatedAt:   n.CreatedAt,
+		ID:            n.ID,
+		UserID:        n.UserID,
+		Type:          string(n.Type),
+		Message:       n.Message,
+		WorkOrderID:   n.WorkOrderID,
+		BorrowID:      n.BorrowID,
+		DiscrepancyID: n.DiscrepancyID,
+		DedupKey:      n.DedupKey,
+		ReadAt:        n.ReadAt,
+		CreatedAt:     n.CreatedAt,
 	}
-	return r.db.WithContext(ctx).Create(m).Error
+	q := tx.WithContext(ctx)
+	if n.DedupKey != nil {
+		q = q.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "dedup_key"}}, DoNothing: true})
+	}
+	return q.Create(m).Error
 }
 
 func (r *GormNotificationRepo) ListByUser(ctx context.Context, userID string, unreadOnly bool) ([]*notification.Notification, error) {

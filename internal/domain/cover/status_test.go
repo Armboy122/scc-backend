@@ -18,7 +18,7 @@ func TestIsValidTransition_CoverStateMachine(t *testing.T) {
 		{"in_stock -> installed", cover.StatusInStock, cover.StatusInstalled, true},
 		{"in_stock -> retired", cover.StatusInStock, cover.StatusRetired, true},
 		{"installed -> in_stock", cover.StatusInstalled, cover.StatusInStock, true},
-		{"installed -> retired", cover.StatusInstalled, cover.StatusRetired, true},
+		{"installed -> retired", cover.StatusInstalled, cover.StatusRetired, false},
 
 		// Invalid transitions
 		{"retired -> in_stock", cover.StatusRetired, cover.StatusInStock, false},

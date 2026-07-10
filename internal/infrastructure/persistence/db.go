@@ -56,7 +56,7 @@ func InitDB(dsn string, seedData bool, autoMigrate bool) (*gorm.DB, error) {
 }
 
 func migrate(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&WorkHubModel{},
 		&OfficeModel{},
 		&UserModel{},
@@ -66,8 +66,46 @@ func migrate(db *gorm.DB) error {
 		&InstallationModel{},
 		&BorrowModel{},
 		&BorrowCoverModel{},
+		&BorrowAuditModel{},
+		&BorrowNotificationOutboxModel{},
+		&DiscrepancyModel{},
+		&DiscrepancyAuditModel{},
 		&NotificationModel{},
-	)
+	); err != nil {
+		return err
+	}
+
+	// A cover can have many historical installation records, but at most one
+	// installation whose lifecycle is currently open. AutoMigrate does not
+	// reliably add partial indexes to an already-existing production table, so
+	// enforce this invariant explicitly as well as in the SQL migration set.
+	if err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_installations_one_active_cover
+		ON installations (cover_id)
+		WHERE installed_at IS NOT NULL AND removed_at IS NULL
+	`).Error; err != nil {
+		return err
+	}
+	if err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_installations_work_order_cover
+		ON installations (work_order_id, cover_id)
+	`).Error; err != nil {
+		return err
+	}
+	if err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_borrow_covers_one_active_cover
+		ON borrow_covers (cover_id)
+		WHERE released_at IS NULL
+	`).Error; err != nil {
+		return err
+	}
+	if err := db.Exec(`DROP INDEX IF EXISTS idx_notifications_dedupe_key`).Error; err != nil {
+		return err
+	}
+	return db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedup_key
+		ON notifications (dedup_key)
+	`).Error
 }
 
 func seed(db *gorm.DB) error {

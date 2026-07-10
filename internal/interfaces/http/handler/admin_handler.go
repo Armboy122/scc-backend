@@ -3,32 +3,41 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/smartcover/backend/internal/domain/user"
+	"github.com/smartcover/backend/internal/interfaces/http/middleware"
 	"github.com/smartcover/backend/internal/interfaces/http/response"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // AdminHandler handles admin-only management endpoints.
 type AdminHandler struct {
-	userRepo    user.UserRepository
-	officeRepo  user.OfficeRepository
-	workHubRepo user.WorkHubRepository
+	userRepo       user.UserRepository
+	technicianRepo user.TechnicianRepository
+	officeRepo     user.OfficeRepository
+	workHubRepo    user.WorkHubRepository
+}
+
+type adminUserRepository interface {
+	user.UserRepository
+	user.TechnicianRepository
 }
 
 // NewAdminHandler creates a new AdminHandler.
 func NewAdminHandler(
-	userRepo user.UserRepository,
+	userRepo adminUserRepository,
 	officeRepo user.OfficeRepository,
 	workHubRepo user.WorkHubRepository,
 ) *AdminHandler {
 	return &AdminHandler{
-		userRepo:    userRepo,
-		officeRepo:  officeRepo,
-		workHubRepo: workHubRepo,
+		userRepo:       userRepo,
+		technicianRepo: userRepo,
+		officeRepo:     officeRepo,
+		workHubRepo:    workHubRepo,
 	}
 }
 
@@ -107,6 +116,65 @@ func (h *AdminHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	response.JSONWithMeta(w, http.StatusOK, result, filter.Page, filter.Limit, total)
 }
 
+// ListTechnicians handles GET /technicians for the work-order assignment
+// picker. Admin selects one explicit office; Exec is always forced to the
+// office in the signed access-token claim. Tech is denied defensively in
+// addition to the router role middleware.
+func (h *AdminHandler) ListTechnicians(w http.ResponseWriter, r *http.Request) {
+	officeID, status, message := resolveTechnicianOffice(
+		middleware.GetRoleFromCtx(r.Context()),
+		middleware.GetOfficeIDFromCtx(r.Context()),
+		r.URL.Query().Get("officeId"),
+	)
+	if status != 0 {
+		code := "FORBIDDEN"
+		if status == http.StatusBadRequest {
+			code = "VALIDATION"
+		}
+		response.Error(w, status, code, message)
+		return
+	}
+	if middleware.GetRoleFromCtx(r.Context()) == user.RoleAdmin {
+		exists, err := targetOfficeExists(r.Context(), h.officeRepo, officeID)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to validate office")
+			return
+		}
+		if !exists {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId does not exist")
+			return
+		}
+	}
+
+	technicians, err := h.technicianRepo.ListActiveTechniciansByOffice(r.Context(), officeID)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to list technicians")
+		return
+	}
+	response.JSON(w, http.StatusOK, technicians)
+}
+
+func resolveTechnicianOffice(role user.Role, claimedOfficeID *string, requestedOfficeID string) (string, int, string) {
+	requestedOfficeID = strings.TrimSpace(requestedOfficeID)
+	switch role {
+	case user.RoleAdmin:
+		if requestedOfficeID == "" {
+			return "", http.StatusBadRequest, "officeId query param is required for administrators"
+		}
+		return requestedOfficeID, 0, ""
+	case user.RoleExec:
+		if claimedOfficeID == nil || strings.TrimSpace(*claimedOfficeID) == "" {
+			return "", http.StatusForbidden, "executive has no office"
+		}
+		if requestedOfficeID != "" && requestedOfficeID != *claimedOfficeID {
+			return "", http.StatusForbidden, "cannot list technicians for another office"
+		}
+		return *claimedOfficeID, 0, ""
+	default:
+		return "", http.StatusForbidden, "only executives or administrators can list technicians"
+	}
+}
+
 // CreateUser handles POST /users.
 func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -133,6 +201,21 @@ func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if role.RequiresOffice() && (req.OfficeID == nil || *req.OfficeID == "") {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId is required for exec and tech roles")
 		return
+	}
+	if req.OfficeID != nil {
+		if *req.OfficeID == "" {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId cannot be empty")
+			return
+		}
+		exists, err := targetOfficeExists(r.Context(), h.officeRepo, *req.OfficeID)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			return
+		}
+		if !exists {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId does not exist")
+			return
+		}
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
@@ -170,27 +253,71 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name     *string `json:"name"`
-		Role     *string `json:"role"`
-		OfficeID *string `json:"officeId"`
-		IsActive *bool   `json:"isActive"`
+		Name     jsonField[string] `json:"name"`
+		Role     jsonField[string] `json:"role"`
+		OfficeID jsonField[string] `json:"officeId"`
+		IsActive jsonField[bool]   `json:"isActive"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
 		return
 	}
 
-	if req.Name != nil {
-		u.Name = *req.Name
+	candidateRole := u.Role
+	candidateOfficeID := u.OfficeID
+	if req.Role.Present {
+		if req.Role.Null {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "role cannot be null")
+			return
+		}
+		candidateRole = user.Role(req.Role.Value)
+		if !candidateRole.IsValid() {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid role")
+			return
+		}
 	}
-	if req.Role != nil {
-		u.Role = user.Role(*req.Role)
+	if req.OfficeID.Present {
+		if req.OfficeID.Null {
+			candidateOfficeID = nil
+		} else {
+			candidateOfficeID = &req.OfficeID.Value
+		}
 	}
-	if req.OfficeID != nil {
-		u.OfficeID = req.OfficeID
+	if candidateRole.RequiresOffice() && (candidateOfficeID == nil || *candidateOfficeID == "") {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId is required for exec and tech roles")
+		return
 	}
-	if req.IsActive != nil {
-		u.IsActive = *req.IsActive
+	if candidateOfficeID != nil {
+		if *candidateOfficeID == "" {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId cannot be empty")
+			return
+		}
+		exists, err := targetOfficeExists(r.Context(), h.officeRepo, *candidateOfficeID)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			return
+		}
+		if !exists {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId does not exist")
+			return
+		}
+	}
+
+	if req.Name.Present {
+		if req.Name.Null || req.Name.Value == "" {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "name cannot be null or empty")
+			return
+		}
+		u.Name = req.Name.Value
+	}
+	u.Role = candidateRole
+	u.OfficeID = candidateOfficeID
+	if req.IsActive.Present {
+		if req.IsActive.Null {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "isActive cannot be null")
+			return
+		}
+		u.IsActive = req.IsActive.Value
 	}
 	u.UpdatedAt = time.Now()
 

@@ -28,6 +28,12 @@ var validTransitions = map[BorrowStatus][]BorrowStatus{
 	StatusCancelled: {},
 }
 
+// IsValid reports whether the status is part of the canonical state machine.
+func (s BorrowStatus) IsValid() bool {
+	_, ok := validTransitions[s]
+	return ok
+}
+
 // IsValidTransition returns true if transitioning from current to next is allowed.
 func IsValidTransition(current, next BorrowStatus) bool {
 	allowed, ok := validTransitions[current]

@@ -13,19 +13,21 @@ import (
 
 // Dependencies holds all handler dependencies for the router.
 type Dependencies struct {
-	AuthSvc          *auth.Service
-	AuthHandler      *handler.AuthHandler
-	CoverHandler     *handler.CoverHandler
-	StockHandler     *handler.StockHandler
-	WOHandler        *handler.WorkOrderHandler
-	BorrowHandler    *handler.BorrowHandler
-	ExpansionHandler *handler.ExpansionHandler
-	UploadHandler    *handler.UploadHandler
-	NotifHandler     *handler.NotificationHandler
-	DashHandler      *handler.DashboardHandler
-	AdminHandler     *handler.AdminHandler
-	HealthHandler    *handler.HealthHandler
-	CORSOrigins      string
+	AuthSvc                *auth.Service
+	AuthHandler            *handler.AuthHandler
+	CoverHandler           *handler.CoverHandler
+	StockHandler           *handler.StockHandler
+	WOHandler              *handler.WorkOrderHandler
+	BorrowHandler          *handler.BorrowHandler
+	DiscrepancyHandler     *handler.DiscrepancyHandler
+	ExpansionHandler       *handler.ExpansionHandler
+	UploadHandler          *handler.UploadHandler
+	NotifHandler           *handler.NotificationHandler
+	DashHandler            *handler.DashboardHandler
+	AdminHandler           *handler.AdminHandler
+	HealthHandler          *handler.HealthHandler
+	CORSOrigins            string
+	Phase2BorrowingEnabled bool
 }
 
 // NewRouter builds and returns the chi router.
@@ -39,8 +41,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Use(appMiddleware.CORS(deps.CORSOrigins))
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Health (public)
-		r.Get("/health", deps.HealthHandler.Health)
+		registerHealthRoutes(r, deps.HealthHandler)
 
 		// Auth (public + rate-limited)
 		r.Route("/auth", func(r chi.Router) {
@@ -72,6 +73,8 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Post("/", deps.AdminHandler.CreateUser)
 				r.Patch("/{id}", deps.AdminHandler.UpdateUser)
 			})
+
+			registerTechnicianRoutes(r, deps)
 
 			// Covers
 			r.Route("/covers", func(r chi.Router) {
@@ -106,20 +109,12 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Post("/{id}/start-removal", deps.WOHandler.StartRemoval)
 				r.Post("/{id}/scan-remove", deps.WOHandler.ScanRemove)
 				r.Post("/{id}/installations/{coverId}/photo-remove", deps.WOHandler.PhotoRemove)
+				r.Get("/{id}/installations/{coverId}/evidence/{kind}", deps.WOHandler.EvidenceRead)
 				r.Post("/{id}/complete-removal", deps.WOHandler.CompleteRemoval)
 			})
 
-			// Borrows
-			r.Route("/borrows", func(r chi.Router) {
-				r.Get("/", deps.BorrowHandler.List)
-				r.Post("/", deps.BorrowHandler.Create)
-				r.Get("/{id}", deps.BorrowHandler.Get)
-				r.Post("/{id}/approve", deps.BorrowHandler.Approve)
-				r.Post("/{id}/reject", deps.BorrowHandler.Reject)
-				r.Post("/{id}/cancel", deps.BorrowHandler.Cancel)
-				r.Post("/{id}/activate", deps.BorrowHandler.Activate)
-				r.Post("/{id}/return", deps.BorrowHandler.Return)
-			})
+			registerBorrowRoutes(r, deps)
+			registerDiscrepancyRoutes(r, deps)
 
 			// Uploads (presigned)
 			r.Post("/uploads/presign", deps.UploadHandler.Presign)
@@ -145,4 +140,50 @@ func NewRouter(deps Dependencies) http.Handler {
 	})
 
 	return r
+}
+
+func registerTechnicianRoutes(r chi.Router, deps Dependencies) {
+	r.With(appMiddleware.RequireRole(user.RoleAdmin, user.RoleExec)).
+		Get("/technicians", deps.AdminHandler.ListTechnicians)
+}
+
+func registerHealthRoutes(r chi.Router, health *handler.HealthHandler) {
+	// Health endpoints are public and registered before authentication.
+	r.Get("/livez", health.Live)
+	r.Get("/readyz", health.Ready)
+	r.Get("/health", health.Health)
+}
+
+func registerBorrowRoutes(r chi.Router, deps Dependencies) {
+	// Omitting the routes entirely keeps the backend authoritative even when a
+	// stale or manually modified frontend exposes Phase 2 controls.
+	if !deps.Phase2BorrowingEnabled {
+		return
+	}
+	r.Route("/borrows", func(r chi.Router) {
+		r.Get("/", deps.BorrowHandler.List)
+		r.Post("/", deps.BorrowHandler.Create)
+		r.Get("/availability", deps.BorrowHandler.Availability)
+		r.Get("/{id}", deps.BorrowHandler.Get)
+		r.Post("/{id}/approve", deps.BorrowHandler.Approve)
+		r.Post("/{id}/reject", deps.BorrowHandler.Reject)
+		r.Post("/{id}/cancel", deps.BorrowHandler.Cancel)
+		r.Post("/{id}/activate", deps.BorrowHandler.Activate)
+		r.Post("/{id}/return", deps.BorrowHandler.Return)
+	})
+}
+
+func registerDiscrepancyRoutes(r chi.Router, deps Dependencies) {
+	// Discrepancies are part of the same server-authoritative Phase 2 rollout.
+	// Omitting routes while disabled prevents a stale frontend from widening it.
+	if !deps.Phase2BorrowingEnabled {
+		return
+	}
+	r.Route("/discrepancies", func(r chi.Router) {
+		r.Get("/", deps.DiscrepancyHandler.List)
+		r.Post("/", deps.DiscrepancyHandler.Create)
+		r.Get("/{id}", deps.DiscrepancyHandler.Get)
+		r.With(appMiddleware.RequireRole(user.RoleAdmin)).
+			Post("/{id}/resolve", deps.DiscrepancyHandler.Resolve)
+	})
 }

@@ -27,6 +27,7 @@ type StockSummary struct {
 	Office                *user.Office `json:"office,omitempty"`
 	InStock               int64        `json:"inStock"`
 	ReservedPlanned       int64        `json:"reservedPlanned"`
+	ReservedBorrow        int64        `json:"reservedBorrow"`
 	AvailableForWorkOrder int64        `json:"availableForWorkOrder"`
 	Installed             int64        `json:"installed"`
 	OnLoanOut             int64        `json:"onLoanOut"`

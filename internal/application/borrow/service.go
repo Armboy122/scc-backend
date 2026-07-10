@@ -4,36 +4,40 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	borrowDomain "github.com/smartcover/backend/internal/domain/borrow"
+	coverDomain "github.com/smartcover/backend/internal/domain/cover"
 	notifDomain "github.com/smartcover/backend/internal/domain/notification"
 	"github.com/smartcover/backend/internal/domain/user"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-// ErrNotFound is returned when a borrow does not exist.
-var ErrNotFound = errors.New("borrow not found")
+var (
+	// ErrNotFound is returned when a borrow does not exist.
+	ErrNotFound = errors.New("borrow not found")
+	// ErrStateInvalid is returned for illegal state transitions.
+	ErrStateInvalid = errors.New("invalid borrow state transition")
+	// ErrForbidden is returned when the actor cannot perform the operation.
+	ErrForbidden = errors.New("borrow action forbidden")
+	// ErrConflict is returned when exact covers cannot be reserved or moved.
+	ErrConflict = errors.New("borrow conflict")
+	// ErrValidation is returned for a malformed canonical request.
+	ErrValidation = errors.New("borrow validation failed")
+	// ErrInsufficientStock is returned when lender capacity cannot satisfy a request.
+	ErrInsufficientStock = errors.New("insufficient borrowable stock")
+)
 
-// ErrStateInvalid is returned for illegal state transitions.
-var ErrStateInvalid = errors.New("invalid borrow state transition")
-
-// ErrForbidden is returned when the actor cannot perform the operation.
-var ErrForbidden = errors.New("borrow action forbidden")
-
-// ErrConflict is returned when covers cannot be moved or returned.
-var ErrConflict = errors.New("borrow conflict")
-
-// CreateParams holds the input for creating a borrow request.
+// CreateParams is the canonical server-trusted input for a borrow request.
 type CreateParams struct {
-	BorrowerOfficeID string
-	LenderOfficeID   string
-	CoverIDs         []string
-	Qty              int
-	ReturnDate       *time.Time
-	Note             *string
-	CreatedByID      string
+	LenderOfficeID string
+	RequestedQty   int
+	ReturnDate     time.Time
+	Note           *string
+	Actor          borrowDomain.Actor
 }
 
 // Service handles inter-office borrow lifecycle operations.
@@ -52,368 +56,396 @@ func NewService(repo borrowDomain.BorrowRepository, db *gorm.DB, notifRepo ...no
 	return &Service{repo: repo, db: db, notifRepo: nr}
 }
 
-// Create opens a REQUESTED borrow and reserves explicit BorrowCover rows.
+// Create atomically selects and reserves exact lender-owned covers.
 func (s *Service) Create(ctx context.Context, p CreateParams) (*borrowDomain.Borrow, error) {
-	if p.BorrowerOfficeID == "" || p.LenderOfficeID == "" || p.CreatedByID == "" {
-		return nil, fmt.Errorf("borrowerOfficeId, lenderOfficeId, and createdById are required: %w", ErrConflict)
+	if s.db == nil || s.repo == nil {
+		return nil, errors.New("borrow service is not configured")
 	}
-	if p.BorrowerOfficeID == p.LenderOfficeID {
-		return nil, fmt.Errorf("borrower and lender must differ: %w", ErrConflict)
+	if err := validateActorClaims(p.Actor); err != nil {
+		return nil, err
+	}
+	if p.Actor.Role != user.RoleExec && p.Actor.Role != user.RoleTech {
+		return nil, ErrForbidden
+	}
+	if p.Actor.OfficeID == nil {
+		return nil, ErrForbidden
 	}
 
-	coverIDs := uniqueStrings(p.CoverIDs)
-	if len(coverIDs) == 0 {
-		if p.Qty <= 0 {
-			return nil, fmt.Errorf("coverIds or positive qty is required: %w", ErrConflict)
+	lenderOfficeID := strings.TrimSpace(p.LenderOfficeID)
+	if lenderOfficeID == "" || lenderOfficeID != p.LenderOfficeID {
+		return nil, fmt.Errorf("lenderOfficeId is required and cannot contain surrounding whitespace: %w", ErrValidation)
+	}
+	if lenderOfficeID == *p.Actor.OfficeID {
+		return nil, fmt.Errorf("borrower and lender offices must differ: %w", ErrValidation)
+	}
+	if p.RequestedQty < 1 {
+		return nil, fmt.Errorf("requestedQty must be at least 1: %w", ErrValidation)
+	}
+	now := time.Now().UTC()
+	if p.ReturnDate.IsZero() || !p.ReturnDate.After(now) {
+		return nil, fmt.Errorf("returnDate must be strictly in the future: %w", ErrValidation)
+	}
+	note, err := normalizeOptionalText(p.Note, 500)
+	if err != nil {
+		return nil, err
+	}
+
+	borrowID := uuid.NewString()
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := ensureActiveActorTx(ctx, tx, p.Actor); err != nil {
+			return err
 		}
-		ids, err := s.repo.FindAvailableCoverIDs(ctx, p.LenderOfficeID, p.Qty)
+		if err := ensureOfficeExistsTx(ctx, tx, lenderOfficeID); err != nil {
+			return err
+		}
+		if err := lockPlanningOffice(ctx, tx, lenderOfficeID); err != nil {
+			return err
+		}
+
+		snapshot, err := capacitySnapshotTx(ctx, tx, lenderOfficeID)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if len(ids) < p.Qty {
-			return nil, fmt.Errorf("not enough lender stock: %w", ErrConflict)
+		if int64(p.RequestedQty) > snapshot.BorrowableCapacity {
+			return fmt.Errorf(
+				"requested quantity %d exceeds borrowable capacity %d: %w",
+				p.RequestedQty, snapshot.BorrowableCapacity, ErrInsufficientStock,
+			)
 		}
-		coverIDs = ids
-	}
 
-	if err := s.ensureCoversAvailable(ctx, p.LenderOfficeID, coverIDs); err != nil {
+		coverIDs, err := selectEligibleCoverIDsForUpdate(ctx, tx, lenderOfficeID, p.RequestedQty)
+		if err != nil {
+			return err
+		}
+		if len(coverIDs) != p.RequestedQty {
+			return fmt.Errorf("eligible covers changed while creating request: %w", ErrInsufficientStock)
+		}
+		for _, coverID := range coverIDs {
+			if err := ensureCoverEligibleTx(ctx, tx, coverID, lenderOfficeID); err != nil {
+				return err
+			}
+		}
+
+		if err := tx.WithContext(ctx).Table("borrows").Create(map[string]interface{}{
+			"id":                 borrowID,
+			"borrower_office_id": *p.Actor.OfficeID,
+			"lender_office_id":   lenderOfficeID,
+			"status":             string(borrowDomain.StatusRequested),
+			"requested_qty":      p.RequestedQty,
+			"note":               note,
+			"return_date":        p.ReturnDate.UTC(),
+			"created_by_id":      p.Actor.ID,
+			"created_at":         now,
+			"updated_at":         now,
+		}).Error; err != nil {
+			return fmt.Errorf("insert borrow: %w", err)
+		}
+		for _, coverID := range coverIDs {
+			if err := tx.WithContext(ctx).Table("borrow_covers").Create(map[string]interface{}{
+				"id":         uuid.NewString(),
+				"borrow_id":  borrowID,
+				"cover_id":   coverID,
+				"created_at": now,
+			}).Error; err != nil {
+				return fmt.Errorf("reserve cover %s: %w: %w", coverID, ErrConflict, err)
+			}
+		}
+		if err := insertAuditTx(ctx, tx, auditParams{
+			BorrowID: borrowID, Action: "CREATE", ToStatus: borrowDomain.StatusRequested,
+			Actor: &p.Actor, CreatedAt: now,
+		}); err != nil {
+			return err
+		}
+		return enqueueLenderExecNotificationsTx(
+			ctx, tx, borrowID, lenderOfficeID, notifDomain.TypeBorrowRequested,
+			fmt.Sprintf("มีคำขอยืมฉนวน %d ชิ้นจากสำนักงาน %s", p.RequestedQty, *p.Actor.OfficeID),
+			"requested", now,
+		)
+	})
+	if err != nil {
 		return nil, err
 	}
-
-	now := time.Now()
-	b := &borrowDomain.Borrow{
-		ID:               uuid.NewString(),
-		BorrowerOfficeID: p.BorrowerOfficeID,
-		LenderOfficeID:   p.LenderOfficeID,
-		Status:           borrowDomain.StatusRequested,
-		RequestedQty:     len(coverIDs),
-		Note:             p.Note,
-		ReturnDate:       p.ReturnDate,
-		CreatedByID:      p.CreatedByID,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-		Covers:           make([]*borrowDomain.BorrowCover, 0, len(coverIDs)),
-	}
-	for _, coverID := range coverIDs {
-		b.Covers = append(b.Covers, &borrowDomain.BorrowCover{
-			ID:        uuid.NewString(),
-			BorrowID:  b.ID,
-			CoverID:   coverID,
-			CreatedAt: now,
-		})
-	}
-
-	if err := s.repo.Create(ctx, b); err != nil {
-		return nil, fmt.Errorf("create borrow: %w", err)
-	}
-	if err := s.notifyBorrowRequested(ctx, b); err != nil {
-		return nil, err
-	}
-	return b, nil
+	s.dispatchNotificationsWithoutAffectingState(ctx, borrowID)
+	return s.repo.FindByID(ctx, borrowID)
 }
 
-// GetByID returns a single borrow with its cover links.
-func (s *Service) GetByID(ctx context.Context, id string) (*borrowDomain.Borrow, error) {
-	b, err := s.repo.FindByID(ctx, id)
+// GetByID returns a scoped canonical borrow detail.
+func (s *Service) GetByID(ctx context.Context, id string, actor borrowDomain.Actor) (*borrowDomain.Borrow, error) {
+	if s.repo == nil || s.db == nil {
+		return nil, errors.New("borrow service is not configured")
+	}
+	if err := s.ensureReadableActor(ctx, actor); err != nil {
+		return nil, err
+	}
+	b, err := s.repo.FindByID(ctx, strings.TrimSpace(id))
 	if err != nil {
 		return nil, err
 	}
 	if b == nil {
 		return nil, ErrNotFound
 	}
+	if !actorCanRead(actor, b.BorrowerOffice.ID, b.LenderOffice.ID) {
+		return nil, ErrForbidden
+	}
 	return b, nil
 }
 
-// List returns paginated borrows.
-func (s *Service) List(ctx context.Context, filter borrowDomain.BorrowFilter) ([]*borrowDomain.Borrow, int64, error) {
+// List returns canonical borrows scoped to the authenticated actor.
+func (s *Service) List(ctx context.Context, filter borrowDomain.BorrowFilter, actor borrowDomain.Actor) ([]*borrowDomain.Borrow, int64, error) {
+	if s.repo == nil || s.db == nil {
+		return nil, 0, errors.New("borrow service is not configured")
+	}
+	if err := s.ensureReadableActor(ctx, actor); err != nil {
+		return nil, 0, err
+	}
+	if filter.Direction != "" && filter.Direction != "in" && filter.Direction != "out" {
+		return nil, 0, fmt.Errorf("direction must be in or out: %w", ErrValidation)
+	}
+	if filter.Status != nil && !filter.Status.IsValid() {
+		return nil, 0, fmt.Errorf("invalid borrow status: %w", ErrValidation)
+	}
+	if actor.Role != user.RoleAdmin {
+		filter.OfficeID = actor.OfficeID
+	}
 	return s.repo.List(ctx, filter)
 }
 
-// Approve transitions REQUESTED -> APPROVED. Only an exec of the lender office may approve.
-func (s *Service) Approve(ctx context.Context, id, actorID string, actorRole user.Role, actorOfficeID *string) error {
-	b, err := s.getForAction(ctx, id)
-	if err != nil {
-		return err
+// Availability returns aggregate capacity without scanner or asset identifiers.
+func (s *Service) Availability(ctx context.Context, actor borrowDomain.Actor) ([]borrowDomain.Availability, error) {
+	if s.db == nil {
+		return nil, errors.New("borrow database is not configured")
 	}
-	if !isExecOfOffice(actorRole, actorOfficeID, b.LenderOfficeID) {
-		return ErrForbidden
-	}
-	if err := borrowDomain.MustTransition(b.Status, borrowDomain.StatusApproved); err != nil {
-		return ErrStateInvalid
-	}
-	now := time.Now()
-	b.Status = borrowDomain.StatusApproved
-	b.ApprovedByID = &actorID
-	b.UpdatedAt = now
-	if err := s.repo.Update(ctx, b); err != nil {
-		return err
-	}
-	return s.notifyBorrowApproved(ctx, b)
-}
-
-// Reject transitions REQUESTED -> REJECTED. Only an exec of the lender office may reject.
-func (s *Service) Reject(ctx context.Context, id, actorID string, actorRole user.Role, actorOfficeID *string, reason string) error {
-	b, err := s.getForAction(ctx, id)
-	if err != nil {
-		return err
-	}
-	if !isExecOfOffice(actorRole, actorOfficeID, b.LenderOfficeID) {
-		return ErrForbidden
-	}
-	if err := borrowDomain.MustTransition(b.Status, borrowDomain.StatusRejected); err != nil {
-		return ErrStateInvalid
-	}
-	now := time.Now()
-	b.Status = borrowDomain.StatusRejected
-	b.ApprovedByID = &actorID
-	b.UpdatedAt = now
-	if reason != "" {
-		b.Note = &reason
-	}
-	return s.repo.Update(ctx, b)
-}
-
-// Cancel transitions REQUESTED/APPROVED -> CANCELLED. Only the borrower office may cancel.
-func (s *Service) Cancel(ctx context.Context, id string, actorOfficeID *string, reason string) error {
-	b, err := s.getForAction(ctx, id)
-	if err != nil {
-		return err
-	}
-	if actorOfficeID == nil || *actorOfficeID != b.BorrowerOfficeID {
-		return ErrForbidden
-	}
-	if err := borrowDomain.MustTransition(b.Status, borrowDomain.StatusCancelled); err != nil {
-		return ErrStateInvalid
-	}
-	now := time.Now()
-	b.Status = borrowDomain.StatusCancelled
-	b.UpdatedAt = now
-	if reason != "" {
-		b.Note = &reason
-	}
-	return s.repo.Update(ctx, b)
-}
-
-// Activate transitions APPROVED -> ON_LOAN and moves covers to the borrower office.
-func (s *Service) Activate(ctx context.Context, id string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		b, coverIDs, err := loadBorrowForTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if err := borrowDomain.MustTransition(b.Status, borrowDomain.StatusOnLoan); err != nil {
-			return ErrStateInvalid
-		}
-		if len(coverIDs) == 0 {
-			return fmt.Errorf("borrow has no covers: %w", ErrConflict)
-		}
-
-		now := time.Now()
-		res := tx.Table("covers").
-			Where("id IN ? AND current_office_id = ? AND status = ?", coverIDs, b.LenderOfficeID, "IN_STOCK").
-			Updates(map[string]interface{}{
-				"current_office_id": b.BorrowerOfficeID,
-				"updated_at":        now,
-			})
-		if res.Error != nil {
-			return res.Error
-		}
-		if int(res.RowsAffected) != len(coverIDs) {
-			return fmt.Errorf("not all covers are available at lender office: %w", ErrConflict)
-		}
-
-		return tx.Table("borrows").Where("id = ?", id).Updates(map[string]interface{}{
-			"status":       string(borrowDomain.StatusOnLoan),
-			"activated_at": &now,
-			"updated_at":   now,
-		}).Error
-	})
-}
-
-// Return transitions ON_LOAN/OVERDUE -> RETURNED and moves covers back to the lender office.
-func (s *Service) Return(ctx context.Context, id string) error {
-	var conflictErr error
-	txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		b, coverIDs, err := loadBorrowForTx(tx, id)
-		if err != nil {
-			return err
-		}
-		if err := borrowDomain.MustTransition(b.Status, borrowDomain.StatusReturned); err != nil {
-			return ErrStateInvalid
-		}
-		if len(coverIDs) == 0 {
-			return fmt.Errorf("borrow has no covers: %w", ErrConflict)
-		}
-
-		var installedCount int64
-		if err := tx.Table("covers").Where("id IN ? AND status = ?", coverIDs, "INSTALLED").Count(&installedCount).Error; err != nil {
-			return err
-		}
-		if installedCount > 0 {
-			now := time.Now()
-			if updateErr := tx.Table("borrows").Where("id = ?", id).Updates(map[string]interface{}{
-				"status":     string(borrowDomain.StatusOverdue),
-				"updated_at": now,
-			}).Error; updateErr != nil {
-				return updateErr
-			}
-			conflictErr = fmt.Errorf("borrowed covers are still installed: %w", ErrConflict)
-			return nil
-		}
-
-		now := time.Now()
-		res := tx.Table("covers").
-			Where("id IN ? AND current_office_id = ?", coverIDs, b.BorrowerOfficeID).
-			Updates(map[string]interface{}{
-				"current_office_id": b.LenderOfficeID,
-				"updated_at":        now,
-			})
-		if res.Error != nil {
-			return res.Error
-		}
-		if int(res.RowsAffected) != len(coverIDs) {
-			return fmt.Errorf("not all covers are at borrower office: %w", ErrConflict)
-		}
-
-		return tx.Table("borrows").Where("id = ?", id).Updates(map[string]interface{}{
-			"status":      string(borrowDomain.StatusReturned),
-			"returned_at": &now,
-			"updated_at":  now,
-		}).Error
-	})
-	if txErr != nil {
-		return txErr
-	}
-	return conflictErr
-}
-
-// MarkOverdue marks ON_LOAN borrows past their return date as OVERDUE.
-func (s *Service) MarkOverdue(ctx context.Context, now time.Time) error {
-	return s.db.WithContext(ctx).Table("borrows").
-		Where("status = ? AND return_date IS NOT NULL AND return_date < ?", string(borrowDomain.StatusOnLoan), now).
-		Updates(map[string]interface{}{
-			"status":     string(borrowDomain.StatusOverdue),
-			"updated_at": now,
-		}).Error
-}
-
-func (s *Service) getForAction(ctx context.Context, id string) (*borrowDomain.Borrow, error) {
-	b, err := s.repo.FindByID(ctx, id)
-	if err != nil {
+	if err := s.ensureReadableActor(ctx, actor); err != nil {
 		return nil, err
 	}
-	if b == nil {
-		return nil, ErrNotFound
+
+	type officeRow struct {
+		ID        string
+		Name      string
+		WorkHubID string
 	}
-	return b, nil
+	query := s.db.WithContext(ctx).Table("offices").Select("id, name, work_hub_id")
+	if actor.Role != user.RoleAdmin {
+		query = query.Where("id <> ?", *actor.OfficeID)
+	}
+	var offices []officeRow
+	if err := query.Order("name ASC, id ASC").Scan(&offices).Error; err != nil {
+		return nil, fmt.Errorf("list lender offices: %w", err)
+	}
+
+	result := make([]borrowDomain.Availability, 0, len(offices))
+	for _, office := range offices {
+		snapshot, err := capacitySnapshotTx(ctx, s.db, office.ID)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, borrowDomain.Availability{
+			Office: borrowDomain.OfficeSummary{
+				ID: office.ID, Name: office.Name, WorkHubID: office.WorkHubID,
+			},
+			OwnedInStock:       snapshot.OwnedInStock,
+			ReservedPlanned:    snapshot.ReservedPlanned,
+			ReservedBorrow:     snapshot.ReservedBorrow,
+			BorrowableCapacity: snapshot.BorrowableCapacity,
+		})
+	}
+	return result, nil
 }
 
-func (s *Service) ensureCoversAvailable(ctx context.Context, officeID string, coverIDs []string) error {
+type capacitySnapshot struct {
+	OwnedInStock       int64
+	ReservedPlanned    int64
+	ReservedBorrow     int64
+	Eligible           int64
+	BorrowableCapacity int64
+}
+
+func capacitySnapshotTx(ctx context.Context, tx *gorm.DB, officeID string) (capacitySnapshot, error) {
+	var result capacitySnapshot
+	if err := tx.WithContext(ctx).Table("covers").
+		Where("owner_office_id = ? AND current_office_id = ? AND status = ?", officeID, officeID, string(coverDomain.StatusInStock)).
+		Count(&result.OwnedInStock).Error; err != nil {
+		return result, fmt.Errorf("count lender-owned in-stock covers: %w", err)
+	}
+	if err := tx.WithContext(ctx).Table("work_orders").
+		Where("office_id = ? AND type = ? AND status = ?", officeID, "INSTALL", "SCHEDULED").
+		Select("COALESCE(SUM(planned_qty), 0)").Scan(&result.ReservedPlanned).Error; err != nil {
+		return result, fmt.Errorf("count lender planned reservations: %w", err)
+	}
+	if err := tx.WithContext(ctx).Table("borrow_covers AS bc").
+		Joins("JOIN borrows AS b ON b.id = bc.borrow_id").
+		Where("b.lender_office_id = ? AND bc.released_at IS NULL", officeID).
+		Count(&result.ReservedBorrow).Error; err != nil {
+		return result, fmt.Errorf("count lender borrow reservations: %w", err)
+	}
+	eligible := tx.WithContext(ctx).Table("covers AS c").
+		Where("c.owner_office_id = ? AND c.current_office_id = ? AND c.status = ?", officeID, officeID, string(coverDomain.StatusInStock)).
+		Where("NOT EXISTS (SELECT 1 FROM installations i WHERE i.cover_id = c.id AND i.removed_at IS NULL)").
+		Where("NOT EXISTS (SELECT 1 FROM borrow_covers bc WHERE bc.cover_id = c.id AND bc.released_at IS NULL)")
+	if err := eligible.Count(&result.Eligible).Error; err != nil {
+		return result, fmt.Errorf("count exact eligible lender covers: %w", err)
+	}
+
+	formula := result.OwnedInStock - result.ReservedPlanned - result.ReservedBorrow
+	if formula < 0 {
+		formula = 0
+	}
+	result.BorrowableCapacity = formula
+	if result.Eligible < result.BorrowableCapacity {
+		result.BorrowableCapacity = result.Eligible
+	}
+	return result, nil
+}
+
+func selectEligibleCoverIDsForUpdate(ctx context.Context, tx *gorm.DB, officeID string, quantity int) ([]string, error) {
+	query := tx.WithContext(ctx).Table("covers AS c").
+		Select("c.id").
+		Where("c.owner_office_id = ? AND c.current_office_id = ? AND c.status = ?", officeID, officeID, string(coverDomain.StatusInStock)).
+		Where("NOT EXISTS (SELECT 1 FROM installations i WHERE i.cover_id = c.id AND i.removed_at IS NULL)").
+		Where("NOT EXISTS (SELECT 1 FROM borrow_covers bc WHERE bc.cover_id = c.id AND bc.released_at IS NULL)").
+		Order("c.asset_code ASC, c.id ASC").
+		Limit(quantity)
+	if tx.Dialector.Name() == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var ids []string
+	if err := query.Pluck("c.id", &ids).Error; err != nil {
+		return nil, fmt.Errorf("lock eligible lender covers: %w", err)
+	}
+	return ids, nil
+}
+
+func ensureCoverEligibleTx(ctx context.Context, tx *gorm.DB, coverID, lenderOfficeID string) error {
+	type coverRow struct {
+		ID              string
+		Status          string
+		OwnerOfficeID   string
+		CurrentOfficeID string
+	}
+	query := tx.WithContext(ctx).Table("covers").
+		Select("id, status, owner_office_id, current_office_id").Where("id = ?", coverID)
+	if tx.Dialector.Name() == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var row coverRow
+	if err := query.Take(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("cover %s not found: %w", coverID, ErrConflict)
+		}
+		return err
+	}
+	if row.Status != string(coverDomain.StatusInStock) || row.OwnerOfficeID != lenderOfficeID || row.CurrentOfficeID != lenderOfficeID {
+		return fmt.Errorf("cover %s is not lender-owned available stock: %w", coverID, ErrConflict)
+	}
+	var openInstallations int64
+	if err := tx.WithContext(ctx).Table("installations").
+		Where("cover_id = ? AND removed_at IS NULL", coverID).Count(&openInstallations).Error; err != nil {
+		return err
+	}
+	if openInstallations > 0 {
+		return fmt.Errorf("cover %s has an open installation or draft: %w", coverID, ErrConflict)
+	}
+	var activeReservations int64
+	if err := tx.WithContext(ctx).Table("borrow_covers").
+		Where("cover_id = ? AND released_at IS NULL", coverID).Count(&activeReservations).Error; err != nil {
+		return err
+	}
+	if activeReservations > 0 {
+		return fmt.Errorf("cover %s already has an active borrow reservation: %w", coverID, ErrConflict)
+	}
+	return nil
+}
+
+func lockPlanningOffice(ctx context.Context, tx *gorm.DB, officeID string) error {
+	if tx.Dialector.Name() != "postgres" {
+		return nil
+	}
+	if err := tx.WithContext(ctx).
+		Exec("SELECT pg_advisory_xact_lock(hashtextextended(?, 0))", "scc:planning:"+officeID).
+		Error; err != nil {
+		return fmt.Errorf("lock office planning capacity: %w", err)
+	}
+	return nil
+}
+
+func validateActorClaims(actor borrowDomain.Actor) error {
+	if actor.ID == "" || actor.ID != strings.TrimSpace(actor.ID) || !actor.Role.IsValid() {
+		return ErrForbidden
+	}
+	if actor.Role.RequiresOffice() {
+		if actor.OfficeID == nil || *actor.OfficeID == "" || *actor.OfficeID != strings.TrimSpace(*actor.OfficeID) {
+			return ErrForbidden
+		}
+	}
+	return nil
+}
+
+func (s *Service) ensureReadableActor(ctx context.Context, actor borrowDomain.Actor) error {
+	if err := validateActorClaims(actor); err != nil {
+		return err
+	}
+	return ensureActiveActorTx(ctx, s.db, actor)
+}
+
+func ensureActiveActorTx(ctx context.Context, tx *gorm.DB, actor borrowDomain.Actor) error {
+	type actorRow struct {
+		ID       string
+		Role     string
+		OfficeID *string
+		IsActive bool
+	}
+	var row actorRow
+	query := tx.WithContext(ctx).Table("users").
+		Select("id, role, office_id, is_active").Where("id = ?", actor.ID)
+	if tx.Dialector.Name() == "postgres" {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrForbidden
+		}
+		return err
+	}
+	if !row.IsActive || user.Role(row.Role) != actor.Role {
+		return ErrForbidden
+	}
+	if actor.Role.RequiresOffice() {
+		if actor.OfficeID == nil || row.OfficeID == nil || *actor.OfficeID != *row.OfficeID {
+			return ErrForbidden
+		}
+	}
+	return nil
+}
+
+func ensureOfficeExistsTx(ctx context.Context, tx *gorm.DB, officeID string) error {
 	var count int64
-	err := s.db.WithContext(ctx).Table("covers").
-		Where("id IN ? AND current_office_id = ? AND status = ?", coverIDs, officeID, "IN_STOCK").
-		Count(&count).Error
-	if err != nil {
+	if err := tx.WithContext(ctx).Table("offices").Where("id = ?", officeID).Count(&count).Error; err != nil {
 		return err
 	}
-	if int(count) != len(coverIDs) {
-		return fmt.Errorf("one or more covers are unavailable at lender office: %w", ErrConflict)
+	if count != 1 {
+		return fmt.Errorf("lender office does not exist: %w", ErrValidation)
 	}
 	return nil
 }
 
-type BorrowRow struct {
-	ID               string
-	BorrowerOfficeID string
-	LenderOfficeID   string
-	Status           string
+func actorCanRead(actor borrowDomain.Actor, borrowerOfficeID, lenderOfficeID string) bool {
+	if actor.Role == user.RoleAdmin {
+		return true
+	}
+	return actor.OfficeID != nil && (*actor.OfficeID == borrowerOfficeID || *actor.OfficeID == lenderOfficeID)
 }
 
-func loadBorrowForTx(tx *gorm.DB, id string) (*borrowDomain.Borrow, []string, error) {
-	var row BorrowRow
-	err := tx.Table("borrows").
-		Select("id, borrower_office_id, lender_office_id, status").
-		Where("id = ?", id).
-		First(&row).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil, ErrNotFound
+func normalizeOptionalText(value *string, maxLength int) (*string, error) {
+	if value == nil {
+		return nil, nil
 	}
-	if err != nil {
-		return nil, nil, err
+	normalized := strings.TrimSpace(*value)
+	if normalized == "" {
+		return nil, nil
 	}
-
-	var coverIDs []string
-	if err := tx.Table("borrow_covers").Where("borrow_id = ?", id).Pluck("cover_id", &coverIDs).Error; err != nil {
-		return nil, nil, err
+	if len([]rune(normalized)) > maxLength {
+		return nil, fmt.Errorf("text must not exceed %d characters: %w", maxLength, ErrValidation)
 	}
-
-	return &borrowDomain.Borrow{
-		ID:               row.ID,
-		BorrowerOfficeID: row.BorrowerOfficeID,
-		LenderOfficeID:   row.LenderOfficeID,
-		Status:           borrowDomain.BorrowStatus(row.Status),
-	}, coverIDs, nil
-}
-
-func isExecOfOffice(role user.Role, officeID *string, targetOfficeID string) bool {
-	return role == user.RoleExec && officeID != nil && *officeID == targetOfficeID
-}
-
-func uniqueStrings(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
-	}
-	return result
-}
-
-func (s *Service) notifyBorrowRequested(ctx context.Context, b *borrowDomain.Borrow) error {
-	if s.notifRepo == nil {
-		return nil
-	}
-	var execIDs []string
-	if err := s.db.WithContext(ctx).Table("users").
-		Where("office_id = ? AND role = ? AND is_active = ?", b.LenderOfficeID, string(user.RoleExec), true).
-		Pluck("id", &execIDs).Error; err != nil {
-		return err
-	}
-	for _, userID := range execIDs {
-		borrowID := b.ID
-		n := &notifDomain.Notification{
-			ID:        uuid.NewString(),
-			UserID:    userID,
-			Type:      notifDomain.TypeBorrowRequested,
-			Message:   fmt.Sprintf("มีคำขอยืม cover จากหน่วยงาน %s", b.BorrowerOfficeID),
-			BorrowID:  &borrowID,
-			CreatedAt: time.Now(),
-		}
-		if err := s.notifRepo.Create(ctx, n); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Service) notifyBorrowApproved(ctx context.Context, b *borrowDomain.Borrow) error {
-	if s.notifRepo == nil {
-		return nil
-	}
-	borrowID := b.ID
-	n := &notifDomain.Notification{
-		ID:        uuid.NewString(),
-		UserID:    b.CreatedByID,
-		Type:      notifDomain.TypeBorrowApproved,
-		Message:   fmt.Sprintf("คำขอยืม cover %s ได้รับอนุมัติแล้ว", b.ID),
-		BorrowID:  &borrowID,
-		CreatedAt: time.Now(),
-	}
-	return s.notifRepo.Create(ctx, n)
+	return &normalized, nil
 }

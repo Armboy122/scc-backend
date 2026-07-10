@@ -1,0 +1,16 @@
+[Unit]
+Description=Check Smart Cover Connect backup freshness
+ConditionPathIsDirectory=/opt/scc-backend/backups
+
+[Service]
+Type=oneshot
+User=sccvps
+Group=sccvps
+UMask=0077
+Environment=BACKUP_ROOT=/opt/scc-backend/backups
+ExecStart=/opt/scc-backend/bin/verify-backup.sh --latest --max-age-seconds 93600 --freshness-only
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+TimeoutStartSec=15m

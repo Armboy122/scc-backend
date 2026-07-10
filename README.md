@@ -22,7 +22,7 @@ Current stack decision:
 | Frontend | Vercel |
 | Backend API | VPS via Docker/GHCR, reachable through Caddy HTTPS |
 | Database | PostgreSQL container on the VPS |
-| Image/object storage | MinIO container on the VPS, published through Caddy HTTPS |
+| Image/object storage | Private MinIO bucket; internal verification on Docker network, short-lived signed browser access through Caddy HTTPS |
 | Temporary hostnames | `api.<vps-ip>.sslip.io`, `storage.<vps-ip>.sslip.io` |
 
 NeonDB and Cloudflare R2 are not part of the current runtime stack.

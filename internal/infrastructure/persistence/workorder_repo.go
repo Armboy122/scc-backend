@@ -7,6 +7,7 @@ import (
 
 	"github.com/smartcover/backend/internal/domain/workorder"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GormWorkOrderRepo implements workorder.WorkOrderRepository using GORM.
@@ -102,7 +103,7 @@ func (r *GormWorkOrderRepo) CountReservedPlannedByOffice(ctx context.Context, of
 	q := r.db.WithContext(ctx).Model(&WorkOrderModel{}).
 		Where("office_id = ?", officeID).
 		Where("type = ?", string(workorder.TypeInstall)).
-		Where("status IN ?", []string{string(workorder.StatusScheduled), string(workorder.StatusInstalling)})
+		Where("status = ?", string(workorder.StatusScheduled))
 	if excludeWorkOrderID != nil && *excludeWorkOrderID != "" {
 		q = q.Where("id <> ?", *excludeWorkOrderID)
 	}
@@ -114,7 +115,12 @@ func (r *GormWorkOrderRepo) CountReservedPlannedByOffice(ctx context.Context, of
 
 func (r *GormWorkOrderRepo) AddInstallation(ctx context.Context, inst *workorder.Installation) error {
 	m := fromInstallationDomain(inst)
-	return r.db.WithContext(ctx).Create(m).Error
+	// The unique (work_order_id, cover_id) index plus DO NOTHING makes a
+	// concurrent retry of the same scan idempotent at the write boundary.
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "work_order_id"}, {Name: "cover_id"}},
+		DoNothing: true,
+	}).Create(m).Error
 }
 
 func (r *GormWorkOrderRepo) RemoveInstallation(ctx context.Context, workOrderID, coverID string) error {

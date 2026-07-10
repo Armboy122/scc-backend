@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Smart Cover Connect backup freshness every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:30:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+AccuracySec=1m
+Unit=scc-backup-freshness.service
+
+[Install]
+WantedBy=timers.target

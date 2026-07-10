@@ -1,6 +1,18 @@
 package cover
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrRetirementNotFound is returned by an atomic retirement operation when
+// the target cover does not exist.
+var ErrRetirementNotFound = errors.New("retirement cover not found")
+
+// ErrRetirementConflict is returned when a cover cannot be retired without
+// violating its physical-location, installation, borrowing, or planning
+// commitments.
+var ErrRetirementConflict = errors.New("cover retirement conflict")
 
 // CoverRepository defines persistence operations for Cover.
 type CoverRepository interface {

@@ -17,8 +17,6 @@ func TestIsValidTransition_WorkOrderStateMachine(t *testing.T) {
 		// Valid transitions
 		{"scheduled -> active", workorder.StatusScheduled, workorder.StatusActive, true},
 		{"scheduled -> cancelled", workorder.StatusScheduled, workorder.StatusCancelled, true},
-		{"installing -> active", workorder.StatusInstalling, workorder.StatusActive, true},
-		{"installing -> cancelled", workorder.StatusInstalling, workorder.StatusCancelled, true},
 		{"active -> removal_due", workorder.StatusActive, workorder.StatusRemovalDue, true},
 		{"active -> removing", workorder.StatusActive, workorder.StatusRemoving, true},
 		{"removal_due -> removing", workorder.StatusRemovalDue, workorder.StatusRemoving, true},
@@ -28,10 +26,9 @@ func TestIsValidTransition_WorkOrderStateMachine(t *testing.T) {
 		{"completed -> scheduled", workorder.StatusCompleted, workorder.StatusScheduled, false},
 		{"cancelled -> scheduled", workorder.StatusCancelled, workorder.StatusScheduled, false},
 		{"active -> scheduled", workorder.StatusActive, workorder.StatusScheduled, false},
-		{"active -> installing", workorder.StatusActive, workorder.StatusInstalling, false},
 		{"active -> completed", workorder.StatusActive, workorder.StatusCompleted, false},
 		{"removing -> active", workorder.StatusRemoving, workorder.StatusActive, false},
-		{"scheduled -> installing", workorder.StatusScheduled, workorder.StatusInstalling, false},
+		{"unknown source status", workorder.WorkOrderStatus("UNKNOWN"), workorder.StatusActive, false},
 		{"scheduled -> completed", workorder.StatusScheduled, workorder.StatusCompleted, false},
 	}
 
@@ -44,7 +41,7 @@ func TestIsValidTransition_WorkOrderStateMachine(t *testing.T) {
 }
 
 func TestMustTransition_ReturnsErrorOnInvalidTransition(t *testing.T) {
-	err := workorder.MustTransition(workorder.StatusCompleted, workorder.StatusInstalling)
+	err := workorder.MustTransition(workorder.StatusCompleted, workorder.StatusActive)
 	assert.ErrorIs(t, err, workorder.ErrInvalidTransition)
 }
 
@@ -58,4 +55,24 @@ func TestNoPartialClose_OnlyRemovingCanCompleteIfAllRemoved(t *testing.T) {
 	assert.True(t, workorder.IsValidTransition(workorder.StatusRemoving, workorder.StatusCompleted))
 	assert.False(t, workorder.IsValidTransition(workorder.StatusActive, workorder.StatusCompleted))
 	assert.False(t, workorder.IsValidTransition(workorder.StatusRemovalDue, workorder.StatusCompleted))
+}
+
+func TestCanAssignRejectsTerminalWorkOrders(t *testing.T) {
+	tests := []struct {
+		status  workorder.WorkOrderStatus
+		allowed bool
+	}{
+		{status: workorder.StatusScheduled, allowed: true},
+		{status: workorder.StatusActive, allowed: true},
+		{status: workorder.StatusRemovalDue, allowed: true},
+		{status: workorder.StatusRemoving, allowed: true},
+		{status: workorder.StatusCompleted},
+		{status: workorder.StatusCancelled},
+		{status: workorder.WorkOrderStatus("UNKNOWN")},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			assert.Equal(t, tt.allowed, workorder.CanAssign(tt.status))
+		})
+	}
 }

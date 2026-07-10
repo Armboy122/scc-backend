@@ -22,8 +22,11 @@ func (s CoverStatus) IsValid() bool {
 
 // validTransitions defines allowed status transitions.
 var validTransitions = map[CoverStatus][]CoverStatus{
-	StatusInStock:   {StatusInstalled, StatusRetired},
-	StatusInstalled: {StatusInStock, StatusRetired},
+	StatusInStock: {StatusInstalled, StatusRetired},
+	// An installed cover must be removed through its work order before it can
+	// be retired. Allowing INSTALLED -> RETIRED would leave an open installation
+	// pointing at an asset that can no longer be removed normally.
+	StatusInstalled: {StatusInStock},
 	StatusRetired:   {},
 }
 

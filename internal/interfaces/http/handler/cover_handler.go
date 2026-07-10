@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -16,12 +18,17 @@ import (
 
 // CoverHandler handles cover inventory endpoints.
 type CoverHandler struct {
-	svc *coverApp.Service
+	svc        *coverApp.Service
+	officeRepo user.OfficeRepository
 }
 
 // NewCoverHandler creates a new CoverHandler.
-func NewCoverHandler(svc *coverApp.Service) *CoverHandler {
-	return &CoverHandler{svc: svc}
+func NewCoverHandler(svc *coverApp.Service, officeRepo ...user.OfficeRepository) *CoverHandler {
+	var repo user.OfficeRepository
+	if len(officeRepo) > 0 {
+		repo = officeRepo[0]
+	}
+	return &CoverHandler{svc: svc, officeRepo: repo}
 }
 
 // List handles GET /covers.
@@ -36,7 +43,19 @@ func (h *CoverHandler) List(w http.ResponseWriter, r *http.Request) {
 	// Office scoping: exec/tech only see their own office
 	role := middleware.GetRoleFromCtx(r.Context())
 	officeID := middleware.GetOfficeIDFromCtx(r.Context())
-	if role != user.RoleAdmin && officeID != nil {
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return
+	}
+	if role != user.RoleAdmin {
+		if officeID == nil || *officeID == "" {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user has no office")
+			return
+		}
+		if requested := q.Get("officeId"); requested != "" && requested != *officeID {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access covers for another office")
+			return
+		}
 		filter.OfficeID = officeID
 	} else if q.Get("officeId") != "" {
 		oid := q.Get("officeId")
@@ -69,6 +88,10 @@ func (h *CoverHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role := middleware.GetRoleFromCtx(r.Context())
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return
+	}
 	officeID := middleware.GetOfficeIDFromCtx(r.Context())
 	if role != user.RoleAdmin && (officeID == nil || c.CurrentOfficeID != *officeID) {
 		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access cover for another office")
@@ -85,11 +108,25 @@ func (h *CoverHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	officeID := ""
-	if oid := middleware.GetOfficeIDFromCtx(r.Context()); oid != nil {
-		officeID = *oid
+	role := middleware.GetRoleFromCtx(r.Context())
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return
 	}
-	if q := r.URL.Query().Get("officeId"); q != "" && middleware.GetRoleFromCtx(r.Context()) == user.RoleAdmin {
+	officeID := ""
+	if role != user.RoleAdmin {
+		oid := middleware.GetOfficeIDFromCtx(r.Context())
+		if oid == nil || *oid == "" {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user has no office")
+			return
+		}
+		officeID = *oid
+		if requested := r.URL.Query().Get("officeId"); requested != "" && requested != officeID {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot look up covers for another office")
+			return
+		}
+	}
+	if q := r.URL.Query().Get("officeId"); q != "" && role == user.RoleAdmin {
 		officeID = q
 	}
 
@@ -126,6 +163,9 @@ func (h *CoverHandler) Create(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "assetCode and office are required")
 		return
 	}
+	if !h.requireExistingOffice(w, r, ownerOfficeID) {
+		return
+	}
 
 	c, err := h.svc.Register(r.Context(), coverApp.RegisterItem{
 		AssetCode: req.AssetCode,
@@ -133,6 +173,10 @@ func (h *CoverHandler) Create(w http.ResponseWriter, r *http.Request) {
 		NFCId:     req.NFCId,
 	}, ownerOfficeID)
 	if err != nil {
+		if errors.Is(err, coverApp.ErrValidation) {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
 		response.Error(w, http.StatusConflict, "CONFLICT", err.Error())
 		return
 	}
@@ -158,13 +202,44 @@ func (h *CoverHandler) BatchCreate(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "office and items are required")
 		return
 	}
+	if !h.requireExistingOffice(w, r, ownerOfficeID) {
+		return
+	}
 
 	covers, err := h.svc.RegisterBatch(r.Context(), ownerOfficeID, req.Items)
 	if err != nil {
+		if errors.Is(err, coverApp.ErrValidation) {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
+			return
+		}
 		response.Error(w, http.StatusConflict, "CONFLICT", err.Error())
 		return
 	}
 	response.JSON(w, http.StatusCreated, covers)
+}
+
+func (h *CoverHandler) requireExistingOffice(w http.ResponseWriter, r *http.Request, officeID string) bool {
+	exists, err := targetOfficeExists(r.Context(), h.officeRepo, officeID)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return false
+	}
+	if !exists {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId does not exist")
+		return false
+	}
+	return true
+}
+
+func targetOfficeExists(ctx context.Context, repo user.OfficeRepository, officeID string) (bool, error) {
+	if repo == nil {
+		return false, errors.New("office repository is not configured")
+	}
+	office, err := repo.FindByID(ctx, officeID)
+	if err != nil {
+		return false, fmt.Errorf("find office: %w", err)
+	}
+	return office != nil, nil
 }
 
 // Retire handles POST /covers/:id/retire.
@@ -180,12 +255,14 @@ func (h *CoverHandler) Retire(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.svc.Retire(r.Context(), id, req.Reason); err != nil {
 		switch {
+		case errors.Is(err, coverApp.ErrValidation):
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "reason is required and must be at most 500 characters")
 		case errors.Is(err, coverApp.ErrNotFound):
 			response.Error(w, http.StatusNotFound, "NOT_FOUND", "cover not found")
-		case errors.Is(err, coverDomain.ErrInvalidTransition):
-			response.Error(w, http.StatusConflict, "STATE_INVALID", "cover cannot be retired from current status")
+		case errors.Is(err, coverApp.ErrRetirementConflict), errors.Is(err, coverDomain.ErrInvalidTransition):
+			response.Error(w, http.StatusConflict, "STATE_INVALID", "cover cannot be retired while installed, borrowed, or reserved")
 		default:
-			response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to retire cover")
 		}
 		return
 	}
@@ -201,6 +278,9 @@ func parseIntOr(s string, def int) int {
 
 func resolveWritableOfficeID(r *http.Request, requested string) (string, bool) {
 	role := middleware.GetRoleFromCtx(r.Context())
+	if !role.IsValid() {
+		return "", false
+	}
 	if role == user.RoleAdmin {
 		return requested, true
 	}

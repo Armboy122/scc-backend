@@ -1,9 +1,11 @@
 package handler
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/smartcover/backend/internal/application/auth"
 	domainUser "github.com/smartcover/backend/internal/domain/user"
@@ -13,12 +15,20 @@ import (
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
-	svc *auth.Service
+	svc          authenticationService
+	loginLimiter *loginAttemptLimiter
+}
+
+type authenticationService interface {
+	Login(context.Context, string, string) (*auth.TokenPair, *domainUser.User, error)
+	Refresh(context.Context, string) (*auth.TokenPair, *domainUser.User, error)
+	Logout(context.Context, string) error
+	Me(context.Context, string) (*domainUser.User, error)
 }
 
 // NewAuthHandler creates a new AuthHandler.
 func NewAuthHandler(svc *auth.Service) *AuthHandler {
-	return &AuthHandler{svc: svc}
+	return &AuthHandler{svc: svc, loginLimiter: newLoginAttemptLimiter(defaultLoginLimiterConfig())}
 }
 
 type loginRequest struct {
@@ -58,16 +68,28 @@ func toUserResponse(u *domainUser.User) userResponse {
 // Login handles POST /auth/login.
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictJSON(w, r, &req); err != nil {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
 		return
 	}
-	if req.Username == "" || req.Password == "" {
+	loginUsername := strings.TrimSpace(req.Username)
+	normalizedUsername := normalizeLoginUsername(loginUsername)
+	if loginUsername == "" || strings.TrimSpace(req.Password) == "" {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "username and password are required")
 		return
 	}
+	clientIP := loginClientIP(r)
+	limiter := h.loginLimiter
+	if limiter == nil {
+		limiter = newLoginAttemptLimiter(defaultLoginLimiterConfig())
+	}
+	if retryAfter, limited := limiter.BeginAttempt(clientIP, normalizedUsername); limited {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retryAfter)))
+		response.Error(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many login attempts; try again later")
+		return
+	}
 
-	pair, u, err := h.svc.Login(r.Context(), req.Username, req.Password)
+	pair, u, err := h.svc.Login(r.Context(), loginUsername, req.Password)
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrInvalidCredentials):
@@ -79,6 +101,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	limiter.Reset(clientIP, normalizedUsername)
 
 	response.JSON(w, http.StatusOK, map[string]interface{}{
 		"accessToken":  pair.AccessToken,
@@ -90,14 +113,18 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 // Refresh handles POST /auth/refresh.
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
+	if err := decodeStrictJSON(w, r, &req); err != nil || req.RefreshToken == "" {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "refreshToken is required")
 		return
 	}
 
 	pair, u, err := h.svc.Refresh(r.Context(), req.RefreshToken)
 	if err != nil {
-		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired refresh token")
+		if errors.Is(err, auth.ErrInvalidToken) || errors.Is(err, auth.ErrUserInactive) {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired refresh token")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "refresh failed")
 		return
 	}
 
@@ -111,8 +138,13 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 // Logout handles POST /auth/logout.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	var req logoutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.RefreshToken != "" {
-		_ = h.svc.Logout(r.Context(), req.RefreshToken)
+	if err := decodeStrictJSON(w, r, &req); err != nil || req.RefreshToken == "" {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "refreshToken is required")
+		return
+	}
+	if err := h.svc.Logout(r.Context(), req.RefreshToken); err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "logout failed")
+		return
 	}
 	response.NoContent(w)
 }
@@ -127,7 +159,11 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 
 	u, err := h.svc.Me(r.Context(), userID)
 	if err != nil {
-		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
+		if errors.Is(err, auth.ErrUserInactive) {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "user account is inactive")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "profile lookup failed")
 		return
 	}
 

@@ -1,0 +1,24 @@
+[Unit]
+Description=Smart Cover Connect local PostgreSQL and MinIO backup
+Wants=docker.service
+After=docker.service
+ConditionPathExists=/opt/scc-backend/.env
+
+[Service]
+Type=oneshot
+User=sccvps
+Group=sccvps
+UMask=0077
+Environment=APP_ENV_PATH=/opt/scc-backend/.env
+Environment=BACKUP_ROOT=/opt/scc-backend/backups
+Environment=DOCKER_CONFIG=/tmp/scc-docker-config
+ExecStartPre=/usr/bin/mkdir -p /tmp/scc-docker-config
+ExecStart=/opt/scc-backend/bin/backup-vps.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+TimeoutStartSec=6h

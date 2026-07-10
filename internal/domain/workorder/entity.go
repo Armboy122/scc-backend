@@ -27,11 +27,13 @@ type WorkOrder struct {
 
 // Installation represents the link between a WorkOrder and a Cover.
 type Installation struct {
-	ID              string     `json:"id"`
-	WorkOrderID     string     `json:"workOrderId"`
-	CoverID         string     `json:"coverId"`
-	GpsLat          *float64   `json:"gpsLat,omitempty"`
-	GpsLng          *float64   `json:"gpsLng,omitempty"`
+	ID          string   `json:"id"`
+	WorkOrderID string   `json:"workOrderId"`
+	CoverID     string   `json:"coverId"`
+	GpsLat      *float64 `json:"gpsLat,omitempty"`
+	GpsLng      *float64 `json:"gpsLng,omitempty"`
+	// PhotoInstallURL and PhotoRemoveURL retain their legacy JSON/database names
+	// but contain opaque private object keys, never anonymous URLs.
 	PhotoInstallURL *string    `json:"photoInstallUrl,omitempty"`
 	PhotoRemoveURL  *string    `json:"photoRemoveUrl,omitempty"`
 	InstalledAt     *time.Time `json:"installedAt,omitempty"`

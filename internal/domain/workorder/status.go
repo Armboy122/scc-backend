@@ -7,7 +7,6 @@ type WorkOrderStatus string
 
 const (
 	StatusScheduled  WorkOrderStatus = "SCHEDULED"
-	StatusInstalling WorkOrderStatus = "INSTALLING"
 	StatusActive     WorkOrderStatus = "ACTIVE"
 	StatusRemovalDue WorkOrderStatus = "REMOVAL_DUE"
 	StatusRemoving   WorkOrderStatus = "REMOVING"
@@ -29,7 +28,6 @@ var ErrInvalidTransition = errors.New("invalid work order status transition")
 // validTransitions defines allowed work order status transitions.
 var validTransitions = map[WorkOrderStatus][]WorkOrderStatus{
 	StatusScheduled:  {StatusActive, StatusCancelled},
-	StatusInstalling: {StatusActive, StatusCancelled},
 	StatusActive:     {StatusRemovalDue, StatusRemoving},
 	StatusRemovalDue: {StatusRemoving},
 	StatusRemoving:   {StatusCompleted},
@@ -57,4 +55,15 @@ func MustTransition(current, next WorkOrderStatus) error {
 		return ErrInvalidTransition
 	}
 	return nil
+}
+
+// CanAssign reports whether the work order is still operational and may be
+// assigned or reassigned. Terminal records are immutable assignment history.
+func CanAssign(status WorkOrderStatus) bool {
+	switch status {
+	case StatusScheduled, StatusActive, StatusRemovalDue, StatusRemoving:
+		return true
+	default:
+		return false
+	}
 }

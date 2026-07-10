@@ -4,52 +4,49 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/smartcover/backend/internal/infrastructure/storage"
+	woApp "github.com/smartcover/backend/internal/application/workorder"
+	evidenceDomain "github.com/smartcover/backend/internal/domain/evidence"
 	"github.com/smartcover/backend/internal/interfaces/http/response"
 )
 
-// UploadHandler handles presigned upload URL generation.
+// UploadHandler handles authorized, relation-scoped evidence upload signing.
 type UploadHandler struct {
-	minio *storage.MinioClient
+	svc *woApp.Service
 }
 
-// NewUploadHandler creates a new UploadHandler.
-func NewUploadHandler(minio *storage.MinioClient) *UploadHandler {
-	return &UploadHandler{minio: minio}
+// NewUploadHandler creates an evidence upload handler. Storage remains behind
+// the work-order service so authorization and relation validation cannot be
+// bypassed by calling the generic upload route.
+func NewUploadHandler(svc *woApp.Service) *UploadHandler {
+	return &UploadHandler{svc: svc}
 }
 
 // Presign handles POST /uploads/presign.
 func (h *UploadHandler) Presign(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Kind        string `json:"kind"` // "install" or "remove"
-		WorkOrderID string `json:"workOrderId"`
-		CoverID     string `json:"coverId"`
+		Kind        evidenceDomain.Kind `json:"kind"`
+		WorkOrderID string              `json:"workOrderId"`
+		CoverID     string              `json:"coverId"`
+		ContentType string              `json:"contentType"`
+		Size        int64               `json:"size"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
 		return
 	}
-	if req.Kind == "" || req.WorkOrderID == "" || req.CoverID == "" {
-		response.Error(w, http.StatusBadRequest, "VALIDATION", "kind, workOrderId, and coverId are required")
+	if h == nil || h.svc == nil {
+		response.Error(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "evidence service is not configured")
 		return
 	}
-	if req.Kind != "install" && req.Kind != "remove" {
-		response.Error(w, http.StatusBadRequest, "VALIDATION", "kind must be 'install' or 'remove'")
-		return
-	}
-	if h.minio == nil {
-		response.Error(w, http.StatusServiceUnavailable, "STORAGE_UNAVAILABLE", "upload storage is not configured")
-		return
-	}
-
-	uploadURL, fileURL, err := h.minio.GeneratePresignedPutURL(r.Context(), req.Kind, req.WorkOrderID, req.CoverID)
+	upload, err := h.svc.PrepareEvidenceUpload(
+		r.Context(), evidenceActorFromRequest(r), req.Kind,
+		req.WorkOrderID, req.CoverID, req.ContentType, req.Size,
+	)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to generate upload URL")
+		handleWorkOrderError(w, err)
 		return
 	}
-
-	response.JSON(w, http.StatusOK, map[string]string{
-		"uploadUrl": uploadURL,
-		"fileUrl":   fileURL,
-	})
+	response.JSON(w, http.StatusOK, upload)
 }

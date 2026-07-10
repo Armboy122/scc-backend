@@ -19,9 +19,22 @@ func NewDashboardHandler(svc *dashApp.Service) *DashboardHandler { return &Dashb
 
 // Summary handles GET /dashboard/summary.
 func (h *DashboardHandler) Summary(w http.ResponseWriter, r *http.Request) {
+	role := middleware.GetRoleFromCtx(r.Context())
+	if !role.IsValid() {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+		return
+	}
+	if role != user.RoleAdmin && role != user.RoleExec {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "dashboard requires executive or administrator role")
+		return
+	}
 	var officeScope *string
-	if middleware.GetRoleFromCtx(r.Context()) != user.RoleAdmin {
+	if role != user.RoleAdmin {
 		officeScope = middleware.GetOfficeIDFromCtx(r.Context())
+		if officeScope == nil || *officeScope == "" {
+			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user has no office")
+			return
+		}
 	}
 	summary, err := h.svc.Summary(r.Context(), officeScope)
 	if err != nil {
