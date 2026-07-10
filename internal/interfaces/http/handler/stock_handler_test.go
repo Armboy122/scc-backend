@@ -154,6 +154,16 @@ func (r *fakeOfficeRepo) Create(ctx context.Context, office *user.Office) error 
 	return nil
 }
 
+func (r *fakeOfficeRepo) Update(_ context.Context, office *user.Office) error {
+	for index, current := range r.offices {
+		if current.ID == office.ID {
+			r.offices[index] = office
+			return nil
+		}
+	}
+	return nil
+}
+
 type fakeCoverRepo struct {
 	inStock       map[string]int64
 	retirementErr error

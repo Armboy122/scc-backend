@@ -170,6 +170,14 @@ func (h *WorkOrderHandler) List(w http.ResponseWriter, r *http.Request) {
 		st := woDomain.WorkOrderStatus(s)
 		filter.Status = &st
 	}
+	if raw := q.Get("usageType"); raw != "" {
+		usageType := woDomain.UsageType(raw)
+		if !usageType.IsValid() {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid usageType")
+			return
+		}
+		filter.UsageType = &usageType
+	}
 
 	wos, total, err := h.svc.List(r.Context(), filter)
 	if err != nil {
@@ -200,16 +208,17 @@ func (h *WorkOrderHandler) Get(w http.ResponseWriter, r *http.Request) {
 // Create handles POST /workorders.
 func (h *WorkOrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		OfficeID      string   `json:"officeId"`
-		CustomerName  string   `json:"customerName"`
-		CustomerPhone *string  `json:"customerPhone"`
-		Note          *string  `json:"note"`
-		GpsLat        *float64 `json:"gpsLat"`
-		GpsLng        *float64 `json:"gpsLng"`
-		PlannedQty    *int     `json:"plannedQty"`
-		InstallDate   *string  `json:"installDate"`
-		RemovalDate   *string  `json:"removalDate"`
-		AssignedToID  *string  `json:"assignedToId"`
+		OfficeID      string             `json:"officeId"`
+		CustomerName  string             `json:"customerName"`
+		CustomerPhone *string            `json:"customerPhone"`
+		Note          *string            `json:"note"`
+		GpsLat        *float64           `json:"gpsLat"`
+		GpsLng        *float64           `json:"gpsLng"`
+		PlannedQty    *int               `json:"plannedQty"`
+		InstallDate   *string            `json:"installDate"`
+		RemovalDate   *string            `json:"removalDate"`
+		AssignedToID  *string            `json:"assignedToId"`
+		UsageType     woDomain.UsageType `json:"usageType"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
@@ -265,6 +274,7 @@ func (h *WorkOrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		RemovalDate:   removalDate,
 		CreatedByID:   userID,
 		AssignedToID:  assignedToID,
+		UsageType:     req.UsageType,
 	}
 
 	wo, err := h.svc.Create(r.Context(), params)

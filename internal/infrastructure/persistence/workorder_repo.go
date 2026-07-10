@@ -13,6 +13,13 @@ import (
 // GormWorkOrderRepo implements workorder.WorkOrderRepository using GORM.
 type GormWorkOrderRepo struct{ db *gorm.DB }
 
+// UsageMetric is the report projection for covers currently installed through
+// work orders of one canonical usage type.
+type UsageMetric struct {
+	UsageType       string `json:"usageType"`
+	InstalledCovers int64  `json:"installedCovers"`
+}
+
 // NewGormWorkOrderRepo creates a new GormWorkOrderRepo.
 func NewGormWorkOrderRepo(db *gorm.DB) *GormWorkOrderRepo { return &GormWorkOrderRepo{db: db} }
 
@@ -57,6 +64,9 @@ func (r *GormWorkOrderRepo) List(ctx context.Context, filter workorder.WorkOrder
 	if filter.Type != nil {
 		q = q.Where("type = ?", string(*filter.Type))
 	}
+	if filter.UsageType != nil {
+		q = q.Where("usage_type = ?", string(*filter.UsageType))
+	}
 	if filter.AssignedToID != nil {
 		q = q.Where("assigned_to_id = ?", *filter.AssignedToID)
 	}
@@ -81,6 +91,24 @@ func (r *GormWorkOrderRepo) List(ctx context.Context, filter workorder.WorkOrder
 		result[i] = toWorkOrderDomain(&models[i])
 	}
 	return result, total, nil
+}
+
+// UsageMetrics counts the physical covers that are currently installed for
+// each usage type. A cover is counted through its active installation only;
+// historical removals never affect current utilization.
+func (r *GormWorkOrderRepo) UsageMetrics(ctx context.Context, officeID *string) ([]UsageMetric, error) {
+	q := r.db.WithContext(ctx).Table("work_orders AS w").
+		Select("w.usage_type AS usage_type, COUNT(DISTINCT i.cover_id) AS installed_covers").
+		Joins("JOIN installations AS i ON i.work_order_id = w.id").
+		Where("i.installed_at IS NOT NULL AND i.removed_at IS NULL")
+	if officeID != nil && *officeID != "" {
+		q = q.Where("w.office_id = ?", *officeID)
+	}
+	var metrics []UsageMetric
+	if err := q.Group("w.usage_type").Order("w.usage_type").Scan(&metrics).Error; err != nil {
+		return nil, err
+	}
+	return metrics, nil
 }
 
 func (r *GormWorkOrderRepo) FindActiveByRemovalDue(ctx context.Context) ([]*workorder.WorkOrder, error) {

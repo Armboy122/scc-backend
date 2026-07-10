@@ -43,6 +43,10 @@ func (r *GormWorkHubRepo) Create(ctx context.Context, wh *user.WorkHub) error {
 	return r.db.WithContext(ctx).Create(m).Error
 }
 
+func (r *GormWorkHubRepo) Update(ctx context.Context, wh *user.WorkHub) error {
+	return r.db.WithContext(ctx).Model(&WorkHubModel{}).Where("id = ?", wh.ID).Update("name", wh.Name).Error
+}
+
 // GormOfficeRepo implements user.OfficeRepository using GORM.
 type GormOfficeRepo struct{ db *gorm.DB }
 
@@ -76,4 +80,10 @@ func (r *GormOfficeRepo) List(ctx context.Context) ([]*user.Office, error) {
 func (r *GormOfficeRepo) Create(ctx context.Context, o *user.Office) error {
 	m := &OfficeModel{ID: o.ID, Name: o.Name, WorkHubID: o.WorkHubID}
 	return r.db.WithContext(ctx).Create(m).Error
+}
+
+func (r *GormOfficeRepo) Update(ctx context.Context, o *user.Office) error {
+	return r.db.WithContext(ctx).Model(&OfficeModel{}).Where("id = ?", o.ID).Updates(map[string]interface{}{
+		"name": o.Name, "work_hub_id": o.WorkHubID,
+	}).Error
 }

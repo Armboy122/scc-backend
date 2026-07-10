@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,13 +13,20 @@ import (
 	"github.com/smartcover/backend/internal/domain/cover"
 	"github.com/smartcover/backend/internal/domain/user"
 	woDomain "github.com/smartcover/backend/internal/domain/workorder"
+	"github.com/smartcover/backend/internal/infrastructure/persistence"
 	"github.com/smartcover/backend/internal/interfaces/http/response"
 )
+
+var errReportOfficeNotFound = errors.New("report office not found")
 
 type ExpansionHandler struct {
 	coverSvc   *coverApp.Service
 	officeRepo user.OfficeRepository
 	woRepo     woDomain.WorkOrderRepository
+}
+
+type usageMetricsReporter interface {
+	UsageMetrics(context.Context, *string) ([]persistence.UsageMetric, error)
 }
 
 func NewExpansionHandler(coverSvc *coverApp.Service, officeRepo user.OfficeRepository, woRepo woDomain.WorkOrderRepository) *ExpansionHandler {
@@ -91,8 +100,12 @@ func (h *ExpansionHandler) RFIDScanBatch(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *ExpansionHandler) ReportsSummary(w http.ResponseWriter, r *http.Request) {
-	offices, err := h.officeRepo.List(r.Context())
+	offices, err := h.reportOffices(r)
 	if err != nil {
+		if errors.Is(err, errReportOfficeNotFound) {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId does not exist")
+			return
+		}
 		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
@@ -120,18 +133,38 @@ func (h *ExpansionHandler) ReportsSummary(w http.ResponseWriter, r *http.Request
 		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
+	var officeID *string
+	if value := r.URL.Query().Get("officeId"); value != "" {
+		officeID = &value
+	}
+	usageByType := map[string]int64{"CUSTOMER_COVER": 0, "INTERNAL": 0}
+	if reporter, ok := h.woRepo.(usageMetricsReporter); ok {
+		metrics, err := reporter.UsageMetrics(r.Context(), officeID)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to aggregate usage metrics")
+			return
+		}
+		for _, metric := range metrics {
+			usageByType[metric.UsageType] = metric.InstalledCovers
+		}
+	}
 	response.JSON(w, http.StatusOK, map[string]interface{}{
 		"totalCovers":      total,
 		"installedCovers":  installed,
 		"utilization":      percent(installed, total),
 		"activeWorkOrders": activeCount,
 		"byOffice":         rows,
+		"usageByType":      usageByType,
 	})
 }
 
 func (h *ExpansionHandler) ReportsCSV(w http.ResponseWriter, r *http.Request) {
-	offices, err := h.officeRepo.List(r.Context())
+	offices, err := h.reportOffices(r)
 	if err != nil {
+		if errors.Is(err, errReportOfficeNotFound) {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "officeId does not exist")
+			return
+		}
 		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
@@ -156,6 +189,21 @@ func (h *ExpansionHandler) ReportsCSV(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	cw.Flush()
+}
+
+func (h *ExpansionHandler) reportOffices(r *http.Request) ([]*user.Office, error) {
+	officeID := r.URL.Query().Get("officeId")
+	if officeID == "" {
+		return h.officeRepo.List(r.Context())
+	}
+	office, err := h.officeRepo.FindByID(r.Context(), officeID)
+	if err != nil {
+		return nil, err
+	}
+	if office == nil {
+		return nil, errReportOfficeNotFound
+	}
+	return []*user.Office{office}, nil
 }
 
 func percent(part, total int64) int {

@@ -91,6 +91,58 @@ func TestCreateUserRejectsUnknownOffice(t *testing.T) {
 	}
 }
 
+func TestListUsersParsesSupportedFilters(t *testing.T) {
+	repo := &adminUserRepo{}
+	h := NewAdminHandler(repo, &fakeOfficeRepo{}, nil)
+	req := httptest.NewRequest(http.MethodGet, "/users?q=anna&role=tech&officeId=office-1&isActive=true&page=2&limit=10", nil)
+	rec := httptest.NewRecorder()
+	h.ListUsers(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	filter := repo.lastUserFilter
+	if filter.Query == nil || *filter.Query != "anna" || filter.Role == nil || *filter.Role != user.RoleTech || filter.OfficeID == nil || *filter.OfficeID != "office-1" || filter.IsActive == nil || !*filter.IsActive || filter.Page != 2 || filter.Limit != 10 {
+		t.Fatalf("unexpected filter: %#v", filter)
+	}
+}
+
+func TestListUsersRejectsInvalidFilters(t *testing.T) {
+	for _, path := range []string{"/users?role=invalid", "/users?isActive=maybe"} {
+		repo := &adminUserRepo{}
+		h := NewAdminHandler(repo, &fakeOfficeRepo{}, nil)
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		h.ListUsers(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d", path, rec.Code)
+		}
+	}
+}
+
+func TestResetUserPasswordValidatesAndRevokesSessions(t *testing.T) {
+	repo := &adminUserRepo{user: &user.User{ID: "user-1", Name: "One", Role: user.RoleTech, IsActive: true}}
+	revoker := &testTokenRevoker{}
+	h := NewAdminHandler(repo, &fakeOfficeRepo{}, nil, revoker)
+
+	for _, test := range []struct {
+		body string
+		want int
+	}{{`{"password":"short"}`, http.StatusBadRequest}, {`{"password":"new-password"}`, http.StatusOK}} {
+		req := httptest.NewRequest(http.MethodPost, "/users/user-1/reset-password", strings.NewReader(test.body))
+		rec := httptest.NewRecorder()
+		h.ResetUserPassword(rec, req)
+		if rec.Code != test.want {
+			t.Fatalf("body %s status=%d want=%d", test.body, rec.Code, test.want)
+		}
+	}
+	if revoker.userID != "user-1" {
+		t.Fatalf("revoked user=%q", revoker.userID)
+	}
+	if repo.user.PasswordHash == "" {
+		t.Fatal("password hash was not updated")
+	}
+}
+
 func TestListTechniciansEnforcesRoleAndOfficeScope(t *testing.T) {
 	officeOne := "office-1"
 	officeTwo := "office-2"
@@ -184,6 +236,14 @@ type adminUserRepo struct {
 	updateCount          int
 	technicians          []user.TechnicianOption
 	lastTechnicianOffice string
+	lastUserFilter       user.UserFilter
+}
+
+type testTokenRevoker struct{ userID string }
+
+func (r *testTokenRevoker) RevokeAllByUserID(_ context.Context, userID string) error {
+	r.userID = userID
+	return nil
 }
 
 func (r *adminUserRepo) FindByID(context.Context, string) (*user.User, error) {
@@ -201,7 +261,8 @@ func (r *adminUserRepo) Update(_ context.Context, value *user.User) error {
 	r.updateCount++
 	return nil
 }
-func (r *adminUserRepo) List(context.Context, user.UserFilter) ([]*user.User, int64, error) {
+func (r *adminUserRepo) List(_ context.Context, filter user.UserFilter) ([]*user.User, int64, error) {
+	r.lastUserFilter = filter
 	return nil, 0, nil
 }
 func (r *adminUserRepo) ListActiveTechniciansByOffice(_ context.Context, officeID string) ([]user.TechnicianOption, error) {

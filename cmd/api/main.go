@@ -128,7 +128,7 @@ func main() {
 	notifHandler := handler.NewNotificationHandler(notifRepo)
 	dashHandler := handler.NewDashboardHandler(dashSvc)
 	expansionHandler := handler.NewExpansionHandler(coverSvc, officeRepo, woRepo)
-	adminHandler := handler.NewAdminHandler(userRepo, officeRepo, hubRepo)
+	adminHandler := handler.NewAdminHandler(userRepo, officeRepo, hubRepo, tokenRepo)
 	healthHandler := handler.NewHealthHandler(sqlDB, minioClient)
 
 	uploadHandler := handler.NewUploadHandler(woSvc)

@@ -77,6 +77,7 @@ func (CoverModel) TableName() string { return "covers" }
 type WorkOrderModel struct {
 	ID            string `gorm:"primaryKey;type:varchar(36)"`
 	Type          string `gorm:"not null"`
+	UsageType     string `gorm:"not null;default:'CUSTOMER_COVER';index"`
 	Status        string `gorm:"not null;default:'SCHEDULED'"`
 	OfficeID      string `gorm:"not null;type:varchar(36);index:idx_wo_office_status"`
 	CustomerName  string `gorm:"not null"`
@@ -311,6 +312,7 @@ func toWorkOrderDomain(m *WorkOrderModel) *workorder.WorkOrder {
 	return &workorder.WorkOrder{
 		ID:            m.ID,
 		Type:          workorder.WorkOrderType(m.Type),
+		UsageType:     workorder.UsageType(m.UsageType),
 		Status:        workorder.WorkOrderStatus(m.Status),
 		OfficeID:      m.OfficeID,
 		CustomerName:  m.CustomerName,
@@ -334,6 +336,7 @@ func fromWorkOrderDomain(wo *workorder.WorkOrder) *WorkOrderModel {
 	return &WorkOrderModel{
 		ID:            wo.ID,
 		Type:          string(wo.Type),
+		UsageType:     string(wo.UsageType),
 		Status:        string(wo.Status),
 		OfficeID:      wo.OfficeID,
 		CustomerName:  wo.CustomerName,

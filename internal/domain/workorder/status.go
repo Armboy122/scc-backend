@@ -22,6 +22,17 @@ const (
 	TypeRemove  WorkOrderType = "REMOVE" // reserved for future
 )
 
+// UsageType classifies the business purpose of a work order. CUSTOMER_COVER
+// is the historical/default contract; INTERNAL is the Phase 3 expansion.
+type UsageType string
+
+const (
+	UsageCustomerCover UsageType = "CUSTOMER_COVER"
+	UsageInternal      UsageType = "INTERNAL"
+)
+
+func (u UsageType) IsValid() bool { return u == UsageCustomerCover || u == UsageInternal }
+
 // ErrInvalidTransition is returned when a work order status transition is not allowed.
 var ErrInvalidTransition = errors.New("invalid work order status transition")
 

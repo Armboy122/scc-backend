@@ -29,6 +29,7 @@ type TechnicianRepository interface {
 
 // UserFilter holds optional filtering criteria for listing users.
 type UserFilter struct {
+	Query    *string
 	OfficeID *string
 	Role     *Role
 	IsActive *bool
@@ -41,6 +42,7 @@ type WorkHubRepository interface {
 	FindByID(ctx context.Context, id string) (*WorkHub, error)
 	List(ctx context.Context) ([]*WorkHub, error)
 	Create(ctx context.Context, wh *WorkHub) error
+	Update(ctx context.Context, wh *WorkHub) error
 }
 
 // OfficeRepository defines persistence operations for Office.
@@ -48,6 +50,7 @@ type OfficeRepository interface {
 	FindByID(ctx context.Context, id string) (*Office, error)
 	List(ctx context.Context) ([]*Office, error)
 	Create(ctx context.Context, o *Office) error
+	Update(ctx context.Context, o *Office) error
 }
 
 // RefreshTokenRepository defines persistence operations for RefreshToken.

@@ -72,6 +72,7 @@ type CreateParams struct {
 	RemovalDate   *time.Time
 	CreatedByID   string
 	AssignedToID  *string
+	UsageType     woDomain.UsageType
 }
 
 // UpdateParams holds presence-aware fields for PATCHing a scheduled work
@@ -163,6 +164,12 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrd
 	if err := validatePlanningFields(p); err != nil {
 		return nil, err
 	}
+	if p.UsageType == "" {
+		p.UsageType = woDomain.UsageCustomerCover
+	}
+	if !p.UsageType.IsValid() {
+		return nil, fmt.Errorf("invalid usageType: %w", ErrValidation)
+	}
 	if p.OfficeID == "" || p.CustomerName == "" || p.CreatedByID == "" {
 		return nil, fmt.Errorf("officeId, customerName, and createdById are required: %w", ErrValidation)
 	}
@@ -174,6 +181,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrd
 	wo := &woDomain.WorkOrder{
 		ID:            uuid.NewString(),
 		Type:          woDomain.TypeInstall,
+		UsageType:     p.UsageType,
 		Status:        woDomain.StatusScheduled,
 		OfficeID:      p.OfficeID,
 		CustomerName:  p.CustomerName,

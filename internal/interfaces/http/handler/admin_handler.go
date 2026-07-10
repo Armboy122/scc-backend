@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +22,9 @@ type AdminHandler struct {
 	technicianRepo user.TechnicianRepository
 	officeRepo     user.OfficeRepository
 	workHubRepo    user.WorkHubRepository
+	tokenRevoker   interface {
+		RevokeAllByUserID(context.Context, string) error
+	}
 }
 
 type adminUserRepository interface {
@@ -32,13 +37,20 @@ func NewAdminHandler(
 	userRepo adminUserRepository,
 	officeRepo user.OfficeRepository,
 	workHubRepo user.WorkHubRepository,
+	tokenRevokers ...interface {
+		RevokeAllByUserID(context.Context, string) error
+	},
 ) *AdminHandler {
-	return &AdminHandler{
+	handler := &AdminHandler{
 		userRepo:       userRepo,
 		technicianRepo: userRepo,
 		officeRepo:     officeRepo,
 		workHubRepo:    workHubRepo,
 	}
+	if len(tokenRevokers) > 0 {
+		handler.tokenRevoker = tokenRevokers[0]
+	}
+	return handler
 }
 
 // ListWorkHubs handles GET /workhubs.
@@ -49,6 +61,55 @@ func (h *AdminHandler) ListWorkHubs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, hubs)
+}
+
+// CreateWorkHub handles POST /workhubs. WorkHubs are master data and are
+// intentionally create-only until a safe archive lifecycle is introduced.
+func (h *AdminHandler) CreateWorkHub(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "name is required")
+		return
+	}
+	workHub := &user.WorkHub{ID: uuid.NewString(), Name: req.Name, CreatedAt: time.Now()}
+	if err := h.workHubRepo.Create(r.Context(), workHub); err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	response.JSON(w, http.StatusCreated, workHub)
+}
+
+func (h *AdminHandler) UpdateWorkHub(w http.ResponseWriter, r *http.Request) {
+	hub, err := h.workHubRepo.FindByID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil || hub == nil {
+		response.Error(w, http.StatusNotFound, "NOT_FOUND", "workhub not found")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
+		return
+	}
+	if name := strings.TrimSpace(req.Name); name == "" {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "name is required")
+		return
+	} else {
+		hub.Name = name
+	}
+	if err := h.workHubRepo.Update(r.Context(), hub); err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	response.JSON(w, http.StatusOK, hub)
 }
 
 // ListOffices handles GET /offices.
@@ -84,12 +145,84 @@ func (h *AdminHandler) CreateOffice(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusCreated, o)
 }
 
+// UpdateOffice handles PATCH /offices/:id. Archive/deactivation is not exposed
+// here because operational-reference checks require a dedicated lifecycle API.
+func (h *AdminHandler) UpdateOffice(w http.ResponseWriter, r *http.Request) {
+	office, err := h.officeRepo.FindByID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil || office == nil {
+		response.Error(w, http.StatusNotFound, "NOT_FOUND", "office not found")
+		return
+	}
+	var req struct {
+		Name      jsonField[string] `json:"name"`
+		WorkHubID jsonField[string] `json:"workHubId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
+		return
+	}
+	if !req.Name.Present && !req.WorkHubID.Present {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "name or workHubId is required")
+		return
+	}
+	if req.Name.Present {
+		if req.Name.Null || strings.TrimSpace(req.Name.Value) == "" {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "name cannot be empty")
+			return
+		}
+		office.Name = strings.TrimSpace(req.Name.Value)
+	}
+	if req.WorkHubID.Present {
+		if req.WorkHubID.Null || strings.TrimSpace(req.WorkHubID.Value) == "" {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "workHubId cannot be empty")
+			return
+		}
+		hub, err := h.workHubRepo.FindByID(r.Context(), req.WorkHubID.Value)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to validate workhub")
+			return
+		}
+		if hub == nil {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "workHubId does not exist")
+			return
+		}
+		office.WorkHubID = req.WorkHubID.Value
+	}
+	if err := h.officeRepo.Update(r.Context(), office); err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	response.JSON(w, http.StatusOK, office)
+}
+
 // ListUsers handles GET /users.
 func (h *AdminHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filter := user.UserFilter{
 		Page:  parseIntOr(q.Get("page"), 1),
 		Limit: parseIntOr(q.Get("limit"), 20),
+	}
+	if value := strings.TrimSpace(q.Get("q")); value != "" {
+		filter.Query = &value
+	}
+	if value := strings.TrimSpace(q.Get("officeId")); value != "" {
+		filter.OfficeID = &value
+	}
+	if value := strings.TrimSpace(q.Get("role")); value != "" {
+		role := user.Role(value)
+		if !role.IsValid() {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid role")
+			return
+		}
+		filter.Role = &role
+	}
+	if value := strings.TrimSpace(q.Get("isActive")); value != "" {
+		active, err := strconv.ParseBool(value)
+		if err != nil {
+			response.Error(w, http.StatusBadRequest, "VALIDATION", "isActive must be true or false")
+			return
+		}
+		filter.IsActive = &active
 	}
 	users, total, err := h.userRepo.List(r.Context(), filter)
 	if err != nil {
@@ -302,6 +435,21 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Never allow the last active administrator to lose administrator access.
+	// This is enforced on the server because UI visibility is not authorization.
+	if u.Role == user.RoleAdmin && u.IsActive && (candidateRole != user.RoleAdmin || (req.IsActive.Present && !req.IsActive.Value)) {
+		active := true
+		adminRole := user.RoleAdmin
+		_, activeAdmins, err := h.userRepo.List(r.Context(), user.UserFilter{Role: &adminRole, IsActive: &active, Page: 1, Limit: 1})
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to verify active administrators")
+			return
+		}
+		if activeAdmins <= 1 {
+			response.Error(w, http.StatusConflict, "STATE_INVALID", "cannot deactivate or change the role of the last active administrator")
+			return
+		}
+	}
 
 	if req.Name.Present {
 		if req.Name.Null || req.Name.Value == "" {
@@ -327,4 +475,45 @@ func (h *AdminHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.JSON(w, http.StatusOK, toUserResponse(u))
+}
+
+// ResetUserPassword handles POST /users/:id/reset-password. The temporary
+// password is never logged or returned; every refresh session is revoked.
+func (h *AdminHandler) ResetUserPassword(w http.ResponseWriter, r *http.Request) {
+	if h.tokenRevoker == nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "session revocation unavailable")
+		return
+	}
+	u, err := h.userRepo.FindByID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil || u == nil {
+		response.Error(w, http.StatusNotFound, "NOT_FOUND", "user not found")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
+		return
+	}
+	if len(req.Password) < 8 {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "password must be at least 8 characters")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), 12)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "password hashing failed")
+		return
+	}
+	u.PasswordHash = string(hash)
+	u.UpdatedAt = time.Now()
+	if err := h.userRepo.Update(r.Context(), u); err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	if err := h.tokenRevoker.RevokeAllByUserID(r.Context(), u.ID); err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "failed to revoke user sessions")
+		return
+	}
+	response.JSON(w, http.StatusOK, map[string]string{"message": "password reset"})
 }

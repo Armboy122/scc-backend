@@ -50,6 +50,10 @@ func (r *GormUserRepo) Update(ctx context.Context, u *user.User) error {
 
 func (r *GormUserRepo) List(ctx context.Context, filter user.UserFilter) ([]*user.User, int64, error) {
 	q := r.db.WithContext(ctx).Model(&UserModel{})
+	if filter.Query != nil && *filter.Query != "" {
+		needle := "%" + *filter.Query + "%"
+		q = q.Where("name ILIKE ? OR username ILIKE ?", needle, needle)
+	}
 	if filter.OfficeID != nil {
 		q = q.Where("office_id = ?", *filter.OfficeID)
 	}

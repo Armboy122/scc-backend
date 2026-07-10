@@ -62,16 +62,20 @@ func NewRouter(deps Dependencies) http.Handler {
 
 			// WorkHubs (all roles)
 			r.Get("/workhubs", deps.AdminHandler.ListWorkHubs)
+			r.With(appMiddleware.RequireRole(user.RoleAdmin)).Post("/workhubs", deps.AdminHandler.CreateWorkHub)
+			r.With(appMiddleware.RequireRole(user.RoleAdmin)).Patch("/workhubs/{id}", deps.AdminHandler.UpdateWorkHub)
 
 			// Offices (all roles)
 			r.Get("/offices", deps.AdminHandler.ListOffices)
 			r.With(appMiddleware.RequireRole(user.RoleAdmin)).Post("/offices", deps.AdminHandler.CreateOffice)
+			r.With(appMiddleware.RequireRole(user.RoleAdmin)).Patch("/offices/{id}", deps.AdminHandler.UpdateOffice)
 
 			// Users (admin only)
 			r.With(appMiddleware.RequireRole(user.RoleAdmin)).Route("/users", func(r chi.Router) {
 				r.Get("/", deps.AdminHandler.ListUsers)
 				r.Post("/", deps.AdminHandler.CreateUser)
 				r.Patch("/{id}", deps.AdminHandler.UpdateUser)
+				r.Post("/{id}/reset-password", deps.AdminHandler.ResetUserPassword)
 			})
 
 			registerTechnicianRoutes(r, deps)

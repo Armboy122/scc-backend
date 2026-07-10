@@ -6,6 +6,7 @@ import "time"
 type WorkOrder struct {
 	ID            string          `json:"id"`
 	Type          WorkOrderType   `json:"type"`
+	UsageType     UsageType       `json:"usageType"`
 	Status        WorkOrderStatus `json:"status"`
 	OfficeID      string          `json:"officeId"`
 	CustomerName  string          `json:"customerName"`

@@ -85,6 +85,15 @@ func (r *GormRefreshTokenRepo) Revoke(ctx context.Context, id string) error {
 		Update("revoked_at", now).Error
 }
 
+// RevokeAllByUserID invalidates every active refresh session after sensitive
+// administrative changes such as a password reset.
+func (r *GormRefreshTokenRepo) RevokeAllByUserID(ctx context.Context, userID string) error {
+	now := time.Now()
+	return r.db.WithContext(ctx).Model(&RefreshTokenModel{}).
+		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Update("revoked_at", now).Error
+}
+
 func (r *GormRefreshTokenRepo) DeleteExpired(ctx context.Context) error {
 	return r.db.WithContext(ctx).
 		Where("expires_at < ? OR revoked_at IS NOT NULL", time.Now().UTC()).

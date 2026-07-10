@@ -25,6 +25,7 @@ type WorkOrderFilter struct {
 	OfficeID     *string
 	Status       *WorkOrderStatus
 	Type         *WorkOrderType
+	UsageType    *UsageType
 	AssignedToID *string
 	CreatedByID  *string
 	Page         int
