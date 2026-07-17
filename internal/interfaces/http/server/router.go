@@ -88,7 +88,6 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Post("/", deps.CoverHandler.Create)
 				r.Post("/batch", deps.CoverHandler.BatchCreate)
 				r.Get("/{id}", deps.CoverHandler.Get)
-				r.Get("/{id}/detail", deps.CoverHandler.GetDetail)
 				r.With(appMiddleware.RequireRole(user.RoleAdmin)).Post("/{id}/retire", deps.CoverHandler.Retire)
 			})
 
