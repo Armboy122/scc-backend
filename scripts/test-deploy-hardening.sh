@@ -161,6 +161,13 @@ case "${1:-}" in
           printf '{"ok":true,"violations":[]}\n'
           ;;
         status)
+          if [[ "${FAKE_MIGRATION_DIRTY:-false}" == "true" ]]; then
+            printf '{"ledgerExists":true,"currentVersion":20260703010000,"migrations":['
+            printf '{"version":20260703010000,"name":"20260703010000_init_schema.sql","state":"applied"},'
+            printf '{"version":20260710020000,"name":"20260710020000_phase1_constraints.sql","state":"dirty"}'
+            printf ']}\n'
+            exit 0
+          fi
           if [[ "${FAKE_MIGRATION_NOOP:-false}" == "true" || -e "${FAKE_DOCKER_STATE_DIR}/.migration-up" ]]; then
             printf '{"ledgerExists":true,"currentVersion":20260710020000,"migrations":['
             printf '{"version":20260703010000,"state":"applied"},'
@@ -1407,6 +1414,31 @@ fi
 if ! grep -q 'forward migrations may have committed' "${migration_failure_stderr}" || \
   grep -q 'AUTO_MIGRATE' "${migration_failure_stderr}"; then
   echo "FAIL: migration failure guidance is stale or omits forward-schema safety" >&2
+  exit 1
+fi
+
+reset_runtime_state
+dirty_migration_stderr="${tmpdir}/dirty-migration.stderr"
+if PATH="${bin_dir}:${PATH}" \
+  FAKE_DOCKER_LOG="${log_file}" \
+  FAKE_DOCKER_STATE_DIR="${docker_state_dir}" \
+  FAKE_CURL_LOG="${curl_log}" \
+  FAKE_TARGET_IMAGE_REF="${immutable_image}" \
+  FAKE_MIGRATION_DIRTY=true \
+  APP_ENV_PATH="${app_env}" \
+  GHCR_IMAGE="${immutable_image}" \
+  CADDYFILE_PATH="${caddyfile_path}" \
+  DEPLOY_STATE_DIR="${deploy_state_dir}" \
+  RELEASE_ID="dirty-migration-release" \
+  MANAGE_CADDY=true \
+  "${repo_root}/scripts/deploy-vps.sh" >/dev/null 2>"${dirty_migration_stderr}"; then
+  echo "FAIL: dirty migration state must fail the deploy" >&2
+  exit 1
+fi
+if ! grep -Fq "unsafe migration status: version=20260710020000 name=20260710020000_phase1_constraints.sql state='dirty'" "${dirty_migration_stderr}" || \
+  ! grep -q '^migration_failed_step=status_before_output_validation$' "${deploy_state_dir}/releases/dirty-migration-release/release.env" || \
+  grep -Eq -- '--entrypoint /app/scc-migrate .* up$|--name scc-backend-candidate' "${log_file}"; then
+  echo "FAIL: dirty migration diagnostic was incomplete or deploy continued" >&2
   exit 1
 fi
 

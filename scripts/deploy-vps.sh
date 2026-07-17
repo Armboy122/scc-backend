@@ -1196,7 +1196,43 @@ run_migration_command() {
 record_migration_output_failure() {
   local label="$1"
   append_release_metadata migration_failed_step "${label}_output_validation"
+  emit_migration_status_diagnostics "${label}" "${MIGRATION_STDOUT_PATH}"
   echo "migration ${label} returned malformed or unsafe output; protected output retained in ${release_dir}" >&2
+}
+
+# Emit only a narrowly validated status summary. The complete migration response
+# stays in the protected release directory because it may evolve independently
+# of this script; the summary makes a dirty ledger actionable from CI logs.
+emit_migration_status_diagnostics() {
+  local label="$1" output_path="$2"
+  if [[ "${label}" != "status_before" && "${label}" != "status_after" ]]; then
+    return 0
+  fi
+  python3 - "${output_path}" <<'PY' >&2 || true
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        payload = json.load(source)
+    migrations = payload["migrations"]
+    if not isinstance(migrations, list):
+        raise ValueError("migrations is not a list")
+except (OSError, UnicodeError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    print("migration status diagnostics unavailable; inspect the protected output")
+    raise SystemExit(0)
+
+for item in migrations:
+    if not isinstance(item, dict) or item.get("state") in {"applied", "pending"}:
+        continue
+    version = item.get("version")
+    name = item.get("name")
+    if isinstance(version, int) and not isinstance(version, bool) and version > 0 and isinstance(name, str) and re.fullmatch(r"\d{14}_[a-z0-9_]+\.sql", name):
+        print(f"unsafe migration status: version={version} name={name} state={item.get('state')!r}")
+    else:
+        print("unsafe migration status detected; inspect the protected output")
+PY
 }
 
 run_migration_contract() {
