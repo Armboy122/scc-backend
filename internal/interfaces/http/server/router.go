@@ -87,7 +87,9 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Get("/lookup", deps.CoverHandler.Lookup)
 				r.Post("/", deps.CoverHandler.Create)
 				r.Post("/batch", deps.CoverHandler.BatchCreate)
+				r.Get("/{id}/detail", deps.CoverHandler.GetDetail)
 				r.Get("/{id}", deps.CoverHandler.Get)
+				r.With(appMiddleware.RequireRole(user.RoleAdmin)).Patch("/{id}/nfc", deps.CoverHandler.UpdateNFCIdentifier)
 				r.With(appMiddleware.RequireRole(user.RoleAdmin)).Post("/{id}/retire", deps.CoverHandler.Retire)
 			})
 

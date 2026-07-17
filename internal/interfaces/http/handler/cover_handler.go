@@ -242,6 +242,34 @@ func (h *CoverHandler) BatchCreate(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusCreated, covers)
 }
 
+// UpdateNFCIdentifier corrects the code written to a physical NFC tag. Route
+// authorization is deliberately enforced in the router: only admins may make
+// this registry change.
+func (h *CoverHandler) UpdateNFCIdentifier(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NFCId string `json:"nfcId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "invalid request body")
+		return
+	}
+	c, err := h.svc.UpdateNFCIdentifier(r.Context(), chi.URLParam(r, "id"), req.NFCId)
+	if err != nil {
+		switch {
+		case errors.Is(err, coverApp.ErrValidation):
+			response.Error(w, http.StatusBadRequest, "VALIDATION", err.Error())
+		case errors.Is(err, coverApp.ErrNotFound):
+			response.Error(w, http.StatusNotFound, "NOT_FOUND", "cover not found")
+		default:
+			// nfc_id has a database uniqueness constraint, so duplicate tag
+			// values are exposed as a conflict just like registration.
+			response.Error(w, http.StatusConflict, "CONFLICT", "NFC tag code is already in use or could not be updated")
+		}
+		return
+	}
+	response.JSON(w, http.StatusOK, c)
+}
+
 func (h *CoverHandler) requireExistingOffice(w http.ResponseWriter, r *http.Request, officeID string) bool {
 	exists, err := targetOfficeExists(r.Context(), h.officeRepo, officeID)
 	if err != nil {

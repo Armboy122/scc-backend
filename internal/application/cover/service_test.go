@@ -108,6 +108,27 @@ func TestRegister_CreatesCoverInStock(t *testing.T) {
 	assert.Equal(t, "office-1", c.OwnerOfficeID)
 }
 
+func TestUpdateNFCIdentifier_NormalizesAndKeepsCoverLifecycle(t *testing.T) {
+	repo := &mockCoverRepo{}
+	svc := coverApp.NewService(repo)
+	oldTag := "OLD-TAG"
+	existing := &coverDomain.Cover{
+		ID: "cover-1", AssetCode: "ASSET-1", NFCId: &oldTag,
+		Status: coverDomain.StatusInstalled, OwnerOfficeID: "office-1", CurrentOfficeID: "office-2",
+	}
+	repo.On("FindByID", mock.Anything, "cover-1").Return(existing, nil)
+	repo.On("Update", mock.Anything, mock.MatchedBy(func(c *coverDomain.Cover) bool {
+		return c.NFCId != nil && *c.NFCId == "NEW-TAG" && c.Status == coverDomain.StatusInstalled &&
+			c.OwnerOfficeID == "office-1" && c.CurrentOfficeID == "office-2"
+	})).Return(nil)
+
+	updated, err := svc.UpdateNFCIdentifier(context.Background(), " cover-1 ", " NEW-TAG ")
+	require.NoError(t, err)
+	require.NotNil(t, updated.NFCId)
+	assert.Equal(t, "NEW-TAG", *updated.NFCId)
+	repo.AssertExpectations(t)
+}
+
 func TestRegister_GeneratesQRCodeWhenMissing(t *testing.T) {
 	repo := &mockCoverRepo{}
 	svc := coverApp.NewService(repo)

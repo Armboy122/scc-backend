@@ -147,6 +147,31 @@ func (s *Service) RegisterBatch(ctx context.Context, ownerOfficeID string, items
 	return result, nil
 }
 
+// UpdateNFCIdentifier changes the identifier stored on an existing NFC tag.
+// The physical tag is written by the client immediately before this method is
+// called; keeping this endpoint narrowly scoped prevents an NFC correction
+// from accidentally changing custody or lifecycle state.
+func (s *Service) UpdateNFCIdentifier(ctx context.Context, coverID, nfcID string) (*coverDomain.Cover, error) {
+	coverID = normalizeIdentifier(coverID)
+	nfcID = normalizeIdentifier(nfcID)
+	if coverID == "" || nfcID == "" {
+		return nil, fmt.Errorf("cover id and nfcId are required: %w", ErrValidation)
+	}
+	c, err := s.coverRepo.FindByID(ctx, coverID)
+	if err != nil {
+		return nil, fmt.Errorf("find cover: %w", err)
+	}
+	if c == nil {
+		return nil, ErrNotFound
+	}
+	c.NFCId = &nfcID
+	c.UpdatedAt = time.Now()
+	if err := s.coverRepo.Update(ctx, c); err != nil {
+		return nil, fmt.Errorf("update NFC identifier: %w", err)
+	}
+	return c, nil
+}
+
 func prepareRegistration(item RegisterItem, ownerOfficeID string, now time.Time) (*coverDomain.Cover, error) {
 	assetCode := normalizeIdentifier(item.AssetCode)
 	ownerOfficeID = normalizeIdentifier(ownerOfficeID)
