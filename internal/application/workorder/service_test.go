@@ -181,8 +181,8 @@ func newInMemoryDB(t *testing.T) *gorm.DB {
 
 	for _, stmt := range []string{
 		`CREATE TABLE work_orders (
-			id text primary key, type text, status text, office_id text,
-			customer_name text, customer_phone text, note text,
+			id text primary key, type text, usage_type text, status text, office_id text,
+			customer_name text, request_number text, customer_phone text, note text,
 			gps_lat real, gps_lng real, planned_qty integer,
 			install_date datetime, removal_date datetime,
 			created_by_id text, assigned_to_id text, started_at datetime,
@@ -780,7 +780,7 @@ func TestSubmitInstall_CopiesWorkOrderGPSOntoInstallations(t *testing.T) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	for _, stmt := range []string{
-		`CREATE TABLE work_orders (id text primary key, type text, status text, office_id text, customer_name text, planned_qty integer, note text, gps_lat real, gps_lng real, assigned_to_id text, completed_at datetime, updated_at datetime)`,
+		`CREATE TABLE work_orders (id text primary key, type text, status text, office_id text, customer_name text, request_number text, planned_qty integer, note text, gps_lat real, gps_lng real, assigned_to_id text, completed_at datetime, updated_at datetime)`,
 		`CREATE TABLE installations (id text primary key, work_order_id text, cover_id text, gps_lat real, gps_lng real, installed_at datetime, removed_at datetime, photo_install_url text, photo_remove_url text)`,
 		`CREATE TABLE covers (id text primary key, asset_code text, qr_code text, status text, owner_office_id text, current_office_id text, updated_at datetime)`,
 		`CREATE TABLE borrows (id text primary key, lender_office_id text not null)`,

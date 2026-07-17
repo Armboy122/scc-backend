@@ -81,6 +81,7 @@ type WorkOrderModel struct {
 	Status        string `gorm:"not null;default:'SCHEDULED'"`
 	OfficeID      string `gorm:"not null;type:varchar(36);index:idx_wo_office_status"`
 	CustomerName  string `gorm:"not null"`
+	RequestNumber *string
 	CustomerPhone *string
 	Note          *string
 	GpsLat        *float64
@@ -316,6 +317,7 @@ func toWorkOrderDomain(m *WorkOrderModel) *workorder.WorkOrder {
 		Status:        workorder.WorkOrderStatus(m.Status),
 		OfficeID:      m.OfficeID,
 		CustomerName:  m.CustomerName,
+		RequestNumber: m.RequestNumber,
 		CustomerPhone: m.CustomerPhone,
 		Note:          m.Note,
 		GpsLat:        m.GpsLat,
@@ -340,6 +342,7 @@ func fromWorkOrderDomain(wo *workorder.WorkOrder) *WorkOrderModel {
 		Status:        string(wo.Status),
 		OfficeID:      wo.OfficeID,
 		CustomerName:  wo.CustomerName,
+		RequestNumber: wo.RequestNumber,
 		CustomerPhone: wo.CustomerPhone,
 		Note:          wo.Note,
 		GpsLat:        wo.GpsLat,

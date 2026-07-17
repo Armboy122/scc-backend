@@ -25,6 +25,7 @@ type stubAuthenticationService struct {
 	logout         func(refreshToken string) error
 	me             func(userID string) (*user.User, error)
 	changePassword func(userID, currentPassword, newPassword string) error
+	updateProfile  func(userID, name string) (*user.User, error)
 }
 
 func (s *stubAuthenticationService) Login(_ context.Context, username, password string) (*auth.TokenPair, *user.User, error) {
@@ -55,6 +56,12 @@ func (s *stubAuthenticationService) ChangePassword(_ context.Context, userID, cu
 		return errors.New("unused")
 	}
 	return s.changePassword(userID, currentPassword, newPassword)
+}
+func (s *stubAuthenticationService) UpdateProfile(_ context.Context, userID, name string) (*user.User, error) {
+	if s.updateProfile == nil {
+		return nil, errors.New("unused")
+	}
+	return s.updateProfile(userID, name)
 }
 
 func testLoginLimiterConfig() loginLimiterConfig {
