@@ -60,7 +60,7 @@ func (r *GormWorkOrderRepo) DashboardMetrics(ctx context.Context, officeID *stri
 		COUNT(DISTINCT CASE WHEN b.return_date < ? THEN bc.cover_id END),
 		COUNT(DISTINCT CASE WHEN b.return_date < ? THEN b.id END)
 		FROM borrows b JOIN borrow_covers bc ON bc.borrow_id = b.id
-		WHERE b.status IN ('ON_LOAN','OVERDUE') AND bc.released_at IS NULL` + borrowScope
+		WHERE b.status IN ('ON_LOAN','OVERDUE')` + borrowScope
 	if err := r.db.WithContext(ctx).Raw(borrowSQL, args...).Row().Scan(
 		&out.BorrowReturnDueSoonCovers, &out.BorrowReturnDueSoonBorrows,
 		&out.BorrowReturnOverdueCovers, &out.BorrowReturnOverdueBorrows,

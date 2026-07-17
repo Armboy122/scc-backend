@@ -31,6 +31,27 @@ var (
 	ErrInsufficientStock = errors.New("insufficient borrowable stock")
 )
 
+// InsufficientStockError reports the capacity snapshot that rejected a request.
+// Callers must still treat it as a point-in-time value: the lender's capacity
+// can change again immediately after the transaction releases its lock.
+type InsufficientStockError struct {
+	RequestedQty       int
+	BorrowableCapacity int64
+}
+
+func (e *InsufficientStockError) Error() string {
+	return fmt.Sprintf(
+		"requested quantity %d exceeds current borrowable capacity %d: %v",
+		e.RequestedQty, e.BorrowableCapacity, ErrInsufficientStock,
+	)
+}
+
+func (e *InsufficientStockError) Unwrap() error { return ErrInsufficientStock }
+
+func insufficientStockError(requestedQty int, capacity int64) error {
+	return &InsufficientStockError{RequestedQty: requestedQty, BorrowableCapacity: capacity}
+}
+
 // CreateParams is the canonical server-trusted input for a borrow request.
 type CreateParams struct {
 	LenderOfficeID string
@@ -107,10 +128,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*borrowDomain.Bor
 			return err
 		}
 		if int64(p.RequestedQty) > snapshot.BorrowableCapacity {
-			return fmt.Errorf(
-				"requested quantity %d exceeds borrowable capacity %d: %w",
-				p.RequestedQty, snapshot.BorrowableCapacity, ErrInsufficientStock,
-			)
+			return insufficientStockError(p.RequestedQty, snapshot.BorrowableCapacity)
 		}
 
 		coverIDs, err := selectEligibleCoverIDsForUpdate(ctx, tx, lenderOfficeID, p.RequestedQty)
@@ -118,7 +136,14 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*borrowDomain.Bor
 			return err
 		}
 		if len(coverIDs) != p.RequestedQty {
-			return fmt.Errorf("eligible covers changed while creating request: %w", ErrInsufficientStock)
+			// A capacity-changing operation normally shares the lender advisory
+			// lock. Recalculate anyway so an unexpected exact-cover race returns
+			// a useful current snapshot rather than a stale generic conflict.
+			latest, snapshotErr := capacitySnapshotTx(ctx, tx, lenderOfficeID)
+			if snapshotErr != nil {
+				return snapshotErr
+			}
+			return insufficientStockError(p.RequestedQty, latest.BorrowableCapacity)
 		}
 		for _, coverID := range coverIDs {
 			if err := ensureCoverEligibleTx(ctx, tx, coverID, lenderOfficeID); err != nil {

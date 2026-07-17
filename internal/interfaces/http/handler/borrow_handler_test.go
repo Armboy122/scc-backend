@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	borrowApp "github.com/smartcover/backend/internal/application/borrow"
 )
 
 func TestBorrowCreateRejectsLegacyClientTrustedFields(t *testing.T) {
@@ -34,6 +36,32 @@ func TestBorrowCreateRejectsLegacyClientTrustedFields(t *testing.T) {
 	}
 	if envelope.Error.Code != "VALIDATION" {
 		t.Fatalf("error code = %q, want VALIDATION", envelope.Error.Code)
+	}
+}
+
+func TestBorrowInsufficientStockReturnsCurrentCapacitySnapshot(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	NewBorrowHandler(nil).handleBorrowError(recorder, &borrowApp.InsufficientStockError{
+		RequestedQty: 7, BorrowableCapacity: 3,
+	})
+
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var envelope struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if envelope.Error.Code != "INSUFFICIENT_STOCK" {
+		t.Fatalf("error code = %q, want INSUFFICIENT_STOCK", envelope.Error.Code)
+	}
+	if !strings.Contains(envelope.Error.Message, "current borrowable capacity 3") {
+		t.Fatalf("error message = %q, want current capacity", envelope.Error.Message)
 	}
 }
 

@@ -249,6 +249,21 @@ func TestAvailabilityUsesPlanningReservationAndExactEligibility(t *testing.T) {
 	assert.EqualValues(t, 3, lender.BorrowableCapacity)
 }
 
+func TestCreateInsufficientStockIncludesLockedCapacitySnapshot(t *testing.T) {
+	f := newBorrowFixture(t, nil)
+	f.seedCover(t, "cover-1", "A-001", "office-lender", "office-lender", coverDomain.StatusInStock)
+
+	_, err := f.svc.Create(context.Background(), borrowApp.CreateParams{
+		LenderOfficeID: "office-lender", RequestedQty: 2,
+		ReturnDate: time.Now().UTC().Add(time.Hour), Actor: f.borrowerExec,
+	})
+	require.ErrorIs(t, err, borrowApp.ErrInsufficientStock)
+	var capacityErr *borrowApp.InsufficientStockError
+	require.ErrorAs(t, err, &capacityErr)
+	assert.Equal(t, 2, capacityErr.RequestedQty)
+	assert.EqualValues(t, 1, capacityErr.BorrowableCapacity)
+}
+
 func TestReadScopeFailsClosedForKnownBorrowID(t *testing.T) {
 	f := newBorrowFixture(t, nil)
 	f.seedCover(t, "cover-1", "A-001", "office-lender", "office-lender", coverDomain.StatusInStock)

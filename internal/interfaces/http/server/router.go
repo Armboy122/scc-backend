@@ -84,7 +84,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			// Covers
 			r.Route("/covers", func(r chi.Router) {
 				r.Get("/", deps.CoverHandler.List)
-				r.Get("/lookup", deps.CoverHandler.Lookup)
+				r.With(appMiddleware.RequireRole(user.RoleAdmin)).Get("/lookup", deps.CoverHandler.Lookup)
 				r.Post("/", deps.CoverHandler.Create)
 				r.Post("/batch", deps.CoverHandler.BatchCreate)
 				r.Get("/{id}/detail", deps.CoverHandler.GetDetail)

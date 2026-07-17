@@ -238,6 +238,11 @@ func (s *Service) Retire(ctx context.Context, coverID, reason string) error {
 }
 
 // Lookup finds a cover by code and checks eligibility for a given office.
+//
+// This is deliberately an operational primitive. HTTP callers must not expose
+// its Cover payload as a way to report an ineligible scan: that would disclose
+// registry metadata across office boundaries. Use LookupDiagnostic for the
+// administrator-only registry diagnostic instead.
 func (s *Service) Lookup(ctx context.Context, code, officeID string) (*coverDomain.LookupResult, error) {
 	c, err := s.coverRepo.FindByCode(ctx, code)
 	if err != nil {
@@ -264,6 +269,20 @@ func (s *Service) Lookup(ctx context.Context, code, officeID string) (*coverDoma
 	}
 
 	return result, nil
+}
+
+// LookupDiagnostic returns the registry record for an administrator's tag
+// diagnostic. It has no eligibility fields because no work-order or office
+// target is being evaluated.
+func (s *Service) LookupDiagnostic(ctx context.Context, code string) (*coverDomain.Cover, error) {
+	c, err := s.coverRepo.FindByCode(ctx, code)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, ErrNotFound
+	}
+	return c, nil
 }
 
 // GetStock returns a stock summary for an office. AvailableForWorkOrder

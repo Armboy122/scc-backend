@@ -124,7 +124,9 @@ func (h *CoverHandler) GetDetail(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, detail)
 }
 
-// Lookup handles GET /covers/lookup?code=.
+// Lookup handles the administrator-only registry diagnostic
+// GET /covers/lookup?code=. Authorization is also applied at the route, but
+// this check keeps the handler safe if it is ever wired elsewhere.
 func (h *CoverHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -132,29 +134,12 @@ func (h *CoverHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role := middleware.GetRoleFromCtx(r.Context())
-	if !role.IsValid() {
-		response.Error(w, http.StatusForbidden, "FORBIDDEN", "invalid user role")
+	if middleware.GetRoleFromCtx(r.Context()) != user.RoleAdmin {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cover diagnostics require an admin role")
 		return
 	}
-	officeID := ""
-	if role != user.RoleAdmin {
-		oid := middleware.GetOfficeIDFromCtx(r.Context())
-		if oid == nil || *oid == "" {
-			response.Error(w, http.StatusForbidden, "FORBIDDEN", "user has no office")
-			return
-		}
-		officeID = *oid
-		if requested := r.URL.Query().Get("officeId"); requested != "" && requested != officeID {
-			response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot look up covers for another office")
-			return
-		}
-	}
-	if q := r.URL.Query().Get("officeId"); q != "" && role == user.RoleAdmin {
-		officeID = q
-	}
 
-	result, err := h.svc.Lookup(r.Context(), code, officeID)
+	result, err := h.svc.LookupDiagnostic(r.Context(), code)
 	if err != nil {
 		if errors.Is(err, coverApp.ErrNotFound) {
 			response.Error(w, http.StatusNotFound, "NOT_FOUND", "cover not found")

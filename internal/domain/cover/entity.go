@@ -49,7 +49,10 @@ type BorrowContext struct {
 	ReturnDate time.Time `json:"returnDate"`
 }
 
-// StockSummary holds a computed stock report for one office.
+// StockSummary holds a physical-custody report for one office. InStock,
+// Installed and Total count covers currently held by the office, including
+// borrowed-in covers; loan metrics overlap with those lifecycle counts and
+// must not be added to Total.
 type StockSummary struct {
 	OfficeID              string       `json:"officeId"`
 	Office                *user.Office `json:"office,omitempty"`

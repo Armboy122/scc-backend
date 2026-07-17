@@ -10,19 +10,10 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
-// TestLookup_ExposesFullCoverDataForAnotherOffice documents that Lookup returns
-// the complete cover record (asset code, NFC id, owner/current office, status)
-// even when the caller's office does not match the cover's office; only the
-// Eligible/Reason fields reflect the scope. This differs from GetByID, which
-// returns 403 for cross-office access.
-//
-// QA note (BUG-LOOKUP-SCOPE, P2 — confirm intent): a non-admin technician can
-// read another office's cover metadata through GET /covers/lookup?code= without
-// physically holding the tag. If field identification of any physical tag is the
-// intended behavior this is acceptable; otherwise the response should be
-// redacted for out-of-scope offices to match GetByID. This test pins the current
-// behavior so a future change is a conscious decision, not an accident.
-func TestLookup_ExposesFullCoverDataForAnotherOffice(t *testing.T) {
+// TestLookupDiagnostic_ReturnsRegistryDataWithoutOperationalEligibility proves
+// that an administrator diagnostic is a registry read, not a cross-office scan
+// eligibility decision. Route authorization keeps this data admin-only.
+func TestLookupDiagnostic_ReturnsRegistryDataWithoutOperationalEligibility(t *testing.T) {
 	repo := &mockCoverRepo{}
 	svc := coverApp.NewService(repo)
 
@@ -37,17 +28,12 @@ func TestLookup_ExposesFullCoverDataForAnotherOffice(t *testing.T) {
 	}
 	repo.On("FindByCode", mock.Anything, "PEA-OTHER-OFFICE").Return(other, nil)
 
-	// Caller belongs to office-1, cover belongs to office-2.
-	result, err := svc.Lookup(context.Background(), "PEA-OTHER-OFFICE", "office-1")
+	result, err := svc.LookupDiagnostic(context.Background(), "PEA-OTHER-OFFICE")
 
 	assert.NoError(t, err)
-	assert.False(t, result.Eligible)
-	assert.Equal(t, "WRONG_OFFICE", result.Reason)
-
-	// Current behavior: the full cover payload is still returned to the caller.
-	if assert.NotNil(t, result.Cover) {
-		assert.Equal(t, "PEA-OTHER-OFFICE", result.Cover.AssetCode)
-		assert.Equal(t, "office-2", result.Cover.OwnerOfficeID)
-		assert.NotNil(t, result.Cover.NFCId)
+	if assert.NotNil(t, result) {
+		assert.Equal(t, "PEA-OTHER-OFFICE", result.AssetCode)
+		assert.Equal(t, "office-2", result.OwnerOfficeID)
+		assert.NotNil(t, result.NFCId)
 	}
 }
