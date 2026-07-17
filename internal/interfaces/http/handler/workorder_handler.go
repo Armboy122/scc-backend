@@ -210,6 +210,7 @@ func (h *WorkOrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		OfficeID      string             `json:"officeId"`
 		CustomerName  string             `json:"customerName"`
+		RequestNumber *string            `json:"requestNumber"`
 		CustomerPhone *string            `json:"customerPhone"`
 		Note          *string            `json:"note"`
 		GpsLat        *float64           `json:"gpsLat"`
@@ -265,6 +266,7 @@ func (h *WorkOrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 	params := woApp.CreateParams{
 		OfficeID:      resolvedOfficeID,
 		CustomerName:  req.CustomerName,
+		RequestNumber: req.RequestNumber,
 		CustomerPhone: req.CustomerPhone,
 		Note:          req.Note,
 		GpsLat:        req.GpsLat,
@@ -297,6 +299,7 @@ func (h *WorkOrderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		CustomerName  jsonField[string]  `json:"customerName"`
+		RequestNumber jsonField[string]  `json:"requestNumber"`
 		CustomerPhone jsonField[string]  `json:"customerPhone"`
 		Note          jsonField[string]  `json:"note"`
 		GpsLat        jsonField[float64] `json:"gpsLat"`
@@ -312,6 +315,7 @@ func (h *WorkOrderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	params := woApp.UpdateParams{
 		CustomerPhoneSet: req.CustomerPhone.Present,
+		RequestNumberSet: req.RequestNumber.Present,
 		NoteSet:          req.Note.Present,
 		GpsLatSet:        req.GpsLat.Present,
 		GpsLngSet:        req.GpsLng.Present,
@@ -326,6 +330,9 @@ func (h *WorkOrderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CustomerPhone.Present && !req.CustomerPhone.Null {
 		params.CustomerPhone = &req.CustomerPhone.Value
+	}
+	if req.RequestNumber.Present && !req.RequestNumber.Null {
+		params.RequestNumber = &req.RequestNumber.Value
 	}
 	if req.Note.Present && !req.Note.Null {
 		params.Note = &req.Note.Value

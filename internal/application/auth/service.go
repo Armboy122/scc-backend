@@ -174,6 +174,26 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 	return nil
 }
 
+// UpdateProfile changes only the account holder's display name.
+func (s *Service) UpdateProfile(ctx context.Context, userID, name string) (*user.User, error) {
+	name = strings.TrimSpace(name)
+	if strings.TrimSpace(userID) == "" || name == "" {
+		return nil, ErrInvalidCredentials
+	}
+	u, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if u == nil || !u.IsActive {
+		return nil, ErrUserInactive
+	}
+	u.Name, u.UpdatedAt = name, time.Now().UTC()
+	if err := s.userRepo.Update(ctx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 // Me returns the user for the given ID.
 func (s *Service) Me(ctx context.Context, userID string) (*user.User, error) {
 	u, err := s.userRepo.FindByID(ctx, userID)

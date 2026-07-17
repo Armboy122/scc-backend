@@ -25,6 +25,7 @@ type authenticationService interface {
 	Logout(context.Context, string) error
 	Me(context.Context, string) (*domainUser.User, error)
 	ChangePassword(context.Context, string, string, string) error
+	UpdateProfile(context.Context, string, string) (*domainUser.User, error)
 }
 
 // NewAuthHandler creates a new AuthHandler.
@@ -48,6 +49,10 @@ type logoutRequest struct {
 type changePasswordRequest struct {
 	CurrentPassword string `json:"currentPassword"`
 	NewPassword     string `json:"newPassword"`
+}
+
+type updateProfileRequest struct {
+	Name string `json:"name"`
 }
 
 // userResponse is the safe user representation returned to clients.
@@ -193,4 +198,24 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, map[string]string{"message": "password changed; please sign in again"})
+}
+
+// UpdateProfile lets an authenticated user change their own display name.
+func (h *AuthHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserIDFromCtx(r.Context())
+	var req updateProfileRequest
+	if userID == "" || decodeStrictJSON(w, r, &req) != nil || strings.TrimSpace(req.Name) == "" {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "name is required")
+		return
+	}
+	u, err := h.svc.UpdateProfile(r.Context(), userID, req.Name)
+	if err != nil {
+		if errors.Is(err, auth.ErrUserInactive) {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "user is inactive")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "profile update failed")
+		return
+	}
+	response.JSON(w, http.StatusOK, toUserResponse(u))
 }

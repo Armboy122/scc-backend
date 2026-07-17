@@ -63,6 +63,7 @@ type EvidenceActor struct {
 type CreateParams struct {
 	OfficeID      string
 	CustomerName  string
+	RequestNumber *string
 	CustomerPhone *string
 	Note          *string
 	GpsLat        *float64
@@ -79,6 +80,8 @@ type CreateParams struct {
 // order. Set flags distinguish an omitted nullable field from an explicit null.
 type UpdateParams struct {
 	CustomerName     *string
+	RequestNumberSet bool
+	RequestNumber    *string
 	CustomerPhoneSet bool
 	CustomerPhone    *string
 	NoteSet          bool
@@ -154,6 +157,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrd
 	p.CustomerName = normalizeBusinessIdentifier(p.CustomerName)
 	p.CreatedByID = normalizeBusinessIdentifier(p.CreatedByID)
 	p.CustomerPhone = normalizeOptionalIdentifier(p.CustomerPhone)
+	p.RequestNumber = normalizeOptionalIdentifier(p.RequestNumber)
 	if p.AssignedToID != nil {
 		assignedToID := normalizeBusinessIdentifier(*p.AssignedToID)
 		if assignedToID == "" {
@@ -185,6 +189,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*woDomain.WorkOrd
 		Status:        woDomain.StatusScheduled,
 		OfficeID:      p.OfficeID,
 		CustomerName:  p.CustomerName,
+		RequestNumber: p.RequestNumber,
 		CustomerPhone: p.CustomerPhone,
 		Note:          p.Note,
 		GpsLat:        p.GpsLat,
@@ -318,6 +323,9 @@ func (s *Service) UpdateScheduled(ctx context.Context, woID string, p UpdatePara
 	if p.CustomerPhoneSet {
 		p.CustomerPhone = normalizeOptionalIdentifier(p.CustomerPhone)
 	}
+	if p.RequestNumberSet {
+		p.RequestNumber = normalizeOptionalIdentifier(p.RequestNumber)
+	}
 	if p.AssignedToIDSet && p.AssignedToID != nil {
 		assignedToID := normalizeBusinessIdentifier(*p.AssignedToID)
 		if assignedToID == "" {
@@ -347,6 +355,9 @@ func (s *Service) UpdateScheduled(ctx context.Context, woID string, p UpdatePara
 		}
 		if p.CustomerPhoneSet {
 			current.CustomerPhone = p.CustomerPhone
+		}
+		if p.RequestNumberSet {
+			current.RequestNumber = p.RequestNumber
 		}
 		if p.NoteSet {
 			current.Note = p.Note
@@ -1244,6 +1255,7 @@ func (r *txWORepoAdapter) Create(ctx context.Context, wo *woDomain.WorkOrder) er
 	return r.db.WithContext(ctx).Table("work_orders").Create(map[string]interface{}{
 		"id": wo.ID, "type": string(wo.Type), "status": string(wo.Status),
 		"office_id": wo.OfficeID, "customer_name": wo.CustomerName,
+		"request_number": wo.RequestNumber, "usage_type": string(wo.UsageType),
 		"customer_phone": wo.CustomerPhone, "note": wo.Note,
 		"gps_lat": wo.GpsLat, "gps_lng": wo.GpsLng,
 		"planned_qty": wo.PlannedQty, "install_date": wo.InstallDate,
@@ -1261,6 +1273,7 @@ func (r *txWORepoAdapter) FindByIDForUpdate(ctx context.Context, id string) (*wo
 		Status        string
 		OfficeID      string
 		CustomerName  string
+		RequestNumber *string
 		CustomerPhone *string
 		Note          *string
 		GpsLat        *float64
@@ -1285,7 +1298,7 @@ func (r *txWORepoAdapter) FindByIDForUpdate(ctx context.Context, id string) (*wo
 	}
 	return &woDomain.WorkOrder{
 		ID: m.ID, Type: woDomain.WorkOrderType(m.Type), Status: woDomain.WorkOrderStatus(m.Status),
-		OfficeID: m.OfficeID, CustomerName: m.CustomerName, CustomerPhone: m.CustomerPhone,
+		OfficeID: m.OfficeID, CustomerName: m.CustomerName, RequestNumber: m.RequestNumber, CustomerPhone: m.CustomerPhone,
 		Note: m.Note, GpsLat: m.GpsLat, GpsLng: m.GpsLng, PlannedQty: m.PlannedQty,
 		InstallDate: m.InstallDate, RemovalDate: m.RemovalDate, CreatedByID: m.CreatedByID,
 		AssignedToID: m.AssignedToID, StartedAt: m.StartedAt, CompletedAt: m.CompletedAt,
@@ -1391,7 +1404,7 @@ func (r *txWORepoAdapter) UpdateScheduled(ctx context.Context, wo *woDomain.Work
 	return r.db.WithContext(ctx).Table("work_orders").
 		Where("id = ? AND status = ?", wo.ID, string(woDomain.StatusScheduled)).
 		Updates(map[string]interface{}{
-			"customer_name": wo.CustomerName, "customer_phone": wo.CustomerPhone,
+			"customer_name": wo.CustomerName, "request_number": wo.RequestNumber, "customer_phone": wo.CustomerPhone,
 			"note": wo.Note, "gps_lat": wo.GpsLat, "gps_lng": wo.GpsLng,
 			"planned_qty": wo.PlannedQty, "install_date": wo.InstallDate,
 			"removal_date": wo.RemovalDate, "assigned_to_id": wo.AssignedToID,

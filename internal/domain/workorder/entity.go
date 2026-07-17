@@ -10,6 +10,7 @@ type WorkOrder struct {
 	Status        WorkOrderStatus `json:"status"`
 	OfficeID      string          `json:"officeId"`
 	CustomerName  string          `json:"customerName"`
+	RequestNumber *string         `json:"requestNumber,omitempty"`
 	CustomerPhone *string         `json:"customerPhone,omitempty"`
 	Note          *string         `json:"note,omitempty"`
 	GpsLat        *float64        `json:"gpsLat,omitempty"`
