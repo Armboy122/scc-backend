@@ -20,6 +20,56 @@ type UsageMetric struct {
 	InstalledCovers int64  `json:"installedCovers"`
 }
 
+// DashboardMetrics returns operational deadline counters from actual active
+// installations and active borrow cover rows. This deliberately never uses
+// planned_qty: a plan reserves capacity but is not a physical installation.
+func (r *GormWorkOrderRepo) DashboardMetrics(ctx context.Context, officeID *string, startOfToday, endOfDueSoon time.Time) (workorder.DashboardMetrics, error) {
+	var out workorder.DashboardMetrics
+	removalScope := ""
+	borrowScope := ""
+	args := []interface{}{startOfToday, endOfDueSoon, startOfToday, endOfDueSoon, startOfToday, startOfToday}
+	if officeID != nil && *officeID != "" {
+		removalScope = " AND w.office_id = ?"
+		borrowScope = " AND (b.lender_office_id = ? OR b.borrower_office_id = ?)"
+		args = append(args, *officeID, *officeID)
+	}
+	// Each SELECT counts distinct physical covers and records separately. An
+	// active installation requires both installed_at and a nil removed_at.
+	removalSQL := `SELECT
+		COUNT(DISTINCT CASE WHEN w.removal_date >= ? AND w.removal_date <= ? THEN i.cover_id END),
+		COUNT(DISTINCT CASE WHEN w.removal_date >= ? AND w.removal_date <= ? THEN w.id END),
+		COUNT(DISTINCT CASE WHEN w.removal_date < ? THEN i.cover_id END),
+		COUNT(DISTINCT CASE WHEN w.removal_date < ? THEN w.id END)
+		FROM work_orders w JOIN installations i ON i.work_order_id = w.id
+		WHERE w.status IN ('ACTIVE','REMOVAL_DUE','REMOVING')
+		AND i.installed_at IS NOT NULL AND i.removed_at IS NULL AND w.removal_date IS NOT NULL` + removalScope
+	removalArgs := []interface{}{startOfToday, endOfDueSoon, startOfToday, endOfDueSoon, startOfToday, startOfToday}
+	if officeID != nil && *officeID != "" {
+		removalArgs = append(removalArgs, *officeID)
+	}
+	if err := r.db.WithContext(ctx).Raw(removalSQL, removalArgs...).Row().Scan(
+		&out.RemovalDueSoonCovers, &out.RemovalDueSoonWorkOrders,
+		&out.RemovalOverdueCovers, &out.RemovalOverdueWorkOrders,
+	); err != nil {
+		return out, err
+	}
+
+	borrowSQL := `SELECT
+		COUNT(DISTINCT CASE WHEN b.return_date >= ? AND b.return_date <= ? THEN bc.cover_id END),
+		COUNT(DISTINCT CASE WHEN b.return_date >= ? AND b.return_date <= ? THEN b.id END),
+		COUNT(DISTINCT CASE WHEN b.return_date < ? THEN bc.cover_id END),
+		COUNT(DISTINCT CASE WHEN b.return_date < ? THEN b.id END)
+		FROM borrows b JOIN borrow_covers bc ON bc.borrow_id = b.id
+		WHERE b.status IN ('ON_LOAN','OVERDUE') AND bc.released_at IS NULL` + borrowScope
+	if err := r.db.WithContext(ctx).Raw(borrowSQL, args...).Row().Scan(
+		&out.BorrowReturnDueSoonCovers, &out.BorrowReturnDueSoonBorrows,
+		&out.BorrowReturnOverdueCovers, &out.BorrowReturnOverdueBorrows,
+	); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 // NewGormWorkOrderRepo creates a new GormWorkOrderRepo.
 func NewGormWorkOrderRepo(db *gorm.DB) *GormWorkOrderRepo { return &GormWorkOrderRepo{db: db} }
 

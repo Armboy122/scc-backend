@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/smartcover/backend/internal/domain/user"
+	"github.com/smartcover/backend/internal/domain/workorder"
 )
 
 // Cover represents a conductor cover (ฉนวนครอบสายไฟ) asset.
@@ -19,6 +20,33 @@ type Cover struct {
 	RetiredReason   *string     `json:"retiredReason,omitempty"`
 	CreatedAt       time.Time   `json:"createdAt"`
 	UpdatedAt       time.Time   `json:"updatedAt"`
+}
+
+// Detail is the read model for one physical cover. Context is intentionally
+// additive: borrowed/due state remains derived data, never Cover.Status.
+type Detail struct {
+	Cover              *Cover                  `json:"cover"`
+	OwnerOffice        *user.Office            `json:"ownerOffice"`
+	CurrentOffice      *user.Office            `json:"currentOffice"`
+	ActiveBorrow       *BorrowContext          `json:"activeBorrow,omitempty"`
+	ActiveInstallation *workorder.Installation `json:"activeInstallation,omitempty"`
+	ActiveWorkOrder    *workorder.WorkOrder    `json:"activeWorkOrder,omitempty"`
+	LifecycleHistory   []LifecycleEvent        `json:"lifecycleHistory"`
+	DerivedAlerts      []string                `json:"derivedAlerts"`
+}
+
+type LifecycleEvent struct {
+	Action    string    `json:"action"`
+	ActorID   *string   `json:"actorId,omitempty"`
+	ActorName *string   `json:"actorName,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	Reason    *string   `json:"reason,omitempty"`
+}
+
+type BorrowContext struct {
+	ID         string    `json:"id"`
+	Status     string    `json:"status"`
+	ReturnDate time.Time `json:"returnDate"`
 }
 
 // StockSummary holds a computed stock report for one office.

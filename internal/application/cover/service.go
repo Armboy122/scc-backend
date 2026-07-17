@@ -63,6 +63,9 @@ type batchCoverCreator interface {
 type guardedCoverRetirer interface {
 	RetireWithCapacityGuard(ctx context.Context, id string, reason string) error
 }
+type detailCoverReader interface {
+	GetDetail(context.Context, string) (*coverDomain.Detail, error)
+}
 
 // PlannedReservationCounter counts not-yet-submitted install demand that still
 // leaves covers physically IN_STOCK but must be reserved before planning another
@@ -307,4 +310,47 @@ func (s *Service) GetByID(ctx context.Context, id string) (*coverDomain.Cover, e
 		return nil, ErrNotFound
 	}
 	return c, nil
+}
+
+// GetDetail returns an additive cross-aggregate read model when persistence
+// supports it. It preserves the legacy detail contract independently.
+func (s *Service) GetDetail(ctx context.Context, id string) (*coverDomain.Detail, error) {
+	reader, ok := s.coverRepo.(detailCoverReader)
+	if !ok {
+		return nil, errors.New("cover repository does not support detail projection")
+	}
+	detail, err := reader.GetDetail(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if detail == nil || detail.Cover == nil {
+		return nil, ErrNotFound
+	}
+	detail.DerivedAlerts = deriveAlerts(detail, time.Now())
+	return detail, nil
+}
+
+func deriveAlerts(detail *coverDomain.Detail, now time.Time) []string {
+	loc, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		loc = time.FixedZone("Asia/Bangkok", 7*60*60)
+	}
+	today := time.Date(now.In(loc).Year(), now.In(loc).Month(), now.In(loc).Day(), 0, 0, 0, 0, loc)
+	soon := today.AddDate(0, 0, 4)
+	alerts := []string{}
+	if wo := detail.ActiveWorkOrder; wo != nil && wo.RemovalDate != nil {
+		if wo.RemovalDate.Before(today) {
+			alerts = append(alerts, "REMOVAL_OVERDUE")
+		} else if wo.RemovalDate.Before(soon) {
+			alerts = append(alerts, "REMOVAL_DUE_SOON")
+		}
+	}
+	if b := detail.ActiveBorrow; b != nil {
+		if b.Status == "OVERDUE" || b.ReturnDate.Before(today) {
+			alerts = append(alerts, "RETURN_OVERDUE")
+		} else if b.ReturnDate.Before(soon) {
+			alerts = append(alerts, "RETURN_DUE_SOON")
+		}
+	}
+	return alerts
 }

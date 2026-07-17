@@ -10,11 +10,31 @@ import (
 	woDomain "github.com/smartcover/backend/internal/domain/workorder"
 )
 
+var bangkokLocation = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		return time.FixedZone("Asia/Bangkok", 7*60*60)
+	}
+	return loc
+}()
+
+type metricsRepository interface {
+	DashboardMetrics(context.Context, *string, time.Time, time.Time) (woDomain.DashboardMetrics, error)
+}
+
 type Summary struct {
 	StockByOffice      []*OfficeStock                     `json:"stockByOffice"`
 	WorkOrdersByStatus map[woDomain.WorkOrderStatus]int64 `json:"workOrdersByStatus"`
 	DueSoon            []*woDomain.WorkOrder              `json:"dueSoon"`
 	OverdueRemovals    []*woDomain.WorkOrder              `json:"overdueRemovals"`
+	Metrics            *woDomain.DashboardMetrics         `json:"metrics,omitempty"`
+}
+
+func bangkokDeadlineWindow(now time.Time) (time.Time, time.Time) {
+	today := time.Date(now.In(bangkokLocation).Year(), now.In(bangkokLocation).Month(), now.In(bangkokLocation).Day(), 0, 0, 0, 0, bangkokLocation)
+	// Inclusive Thai calendar dates: today through day 3. A date at day 4 is
+	// outside the due-soon window regardless of its UTC representation.
+	return today, today.AddDate(0, 0, 4).Add(-time.Nanosecond)
 }
 
 type OfficeStock struct {
@@ -85,17 +105,17 @@ func (s *Service) Summary(ctx context.Context, officeScope *string) (*Summary, e
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
-	soon := now.Add(7 * 24 * time.Hour)
+	now := time.Now().In(bangkokLocation)
+	startOfToday, endOfDueSoon := bangkokDeadlineWindow(now)
 	for _, wo := range wos {
 		if wo.RemovalDate == nil {
 			continue
 		}
-		if !wo.RemovalDate.After(now) {
+		if wo.RemovalDate.Before(startOfToday) {
 			out.OverdueRemovals = append(out.OverdueRemovals, wo)
 			continue
 		}
-		if !wo.RemovalDate.After(soon) {
+		if !wo.RemovalDate.After(endOfDueSoon) {
 			out.DueSoon = append(out.DueSoon, wo)
 		}
 	}
@@ -110,6 +130,14 @@ func (s *Service) Summary(ctx context.Context, officeScope *string) (*Summary, e
 		return nil, err
 	}
 	out.OverdueRemovals = append(out.OverdueRemovals, dueWos...)
+
+	if repo, ok := s.woRepo.(metricsRepository); ok {
+		metrics, err := repo.DashboardMetrics(ctx, officeScope, startOfToday, endOfDueSoon)
+		if err != nil {
+			return nil, err
+		}
+		out.Metrics = &metrics
+	}
 
 	return out, nil
 }

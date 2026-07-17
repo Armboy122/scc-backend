@@ -11,6 +11,64 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// GetDetail projects current cover context. Historical installation rows and
+// terminal work orders are excluded, preventing stale deadline presentation.
+func (r *GormCoverRepo) GetDetail(ctx context.Context, id string) (*cover.Detail, error) {
+	c, err := r.FindByID(ctx, id)
+	if err != nil || c == nil {
+		return nil, err
+	}
+	var owner, current OfficeModel
+	if err := r.db.WithContext(ctx).Where("id = ?", c.OwnerOfficeID).First(&owner).Error; err != nil {
+		return nil, err
+	}
+	if err := r.db.WithContext(ctx).Where("id = ?", c.CurrentOfficeID).First(&current).Error; err != nil {
+		return nil, err
+	}
+	out := &cover.Detail{Cover: c, OwnerOffice: toOfficeDomain(&owner), CurrentOffice: toOfficeDomain(&current), LifecycleHistory: []cover.LifecycleEvent{}}
+	var inst InstallationModel
+	err = r.db.WithContext(ctx).Where("cover_id = ? AND installed_at IS NOT NULL AND removed_at IS NULL", id).Order("installed_at DESC").First(&inst).Error
+	if err == nil {
+		out.ActiveInstallation = toInstallationDomain(&inst)
+		var wo WorkOrderModel
+		if err := r.db.WithContext(ctx).Where("id = ? AND status NOT IN ('COMPLETED','CANCELLED')", inst.WorkOrderID).First(&wo).Error; err == nil {
+			out.ActiveWorkOrder = toWorkOrderDomain(&wo)
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	var b struct {
+		ID         string
+		Status     string
+		ReturnDate time.Time
+	}
+	err = r.db.WithContext(ctx).Table("borrow_covers bc").Select("b.id, b.status, b.return_date").Joins("JOIN borrows b ON b.id = bc.borrow_id").Where("bc.cover_id = ? AND b.status IN ('ON_LOAN','OVERDUE')", id).Order("b.updated_at DESC").Take(&b).Error
+	if err == nil {
+		out.ActiveBorrow = &cover.BorrowContext{ID: b.ID, Status: b.Status, ReturnDate: b.ReturnDate}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	var history []struct {
+		Action    string
+		ActorID   *string
+		ActorName *string
+		CreatedAt time.Time
+		Reason    *string
+	}
+	err = r.db.WithContext(ctx).Table("borrow_audit_events a").
+		Select("a.action, a.actor_id, u.name AS actor_name, a.created_at, a.reason").
+		Joins("JOIN borrow_covers bc ON bc.borrow_id = a.borrow_id").
+		Joins("LEFT JOIN users u ON u.id = a.actor_id").
+		Where("bc.cover_id = ?", id).Order("a.created_at ASC, a.id ASC").Scan(&history).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range history {
+		out.LifecycleHistory = append(out.LifecycleHistory, cover.LifecycleEvent{Action: event.Action, ActorID: event.ActorID, ActorName: event.ActorName, CreatedAt: event.CreatedAt, Reason: event.Reason})
+	}
+	return out, nil
+}
+
 // GormCoverRepo implements cover.CoverRepository using GORM.
 type GormCoverRepo struct{ db *gorm.DB }
 

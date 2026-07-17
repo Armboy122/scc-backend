@@ -167,10 +167,17 @@ func (r *fakeOfficeRepo) Update(_ context.Context, office *user.Office) error {
 type fakeCoverRepo struct {
 	inStock       map[string]int64
 	retirementErr error
+	detail        *coverDomain.Detail
 }
 
 func (r *fakeCoverRepo) FindByID(ctx context.Context, id string) (*coverDomain.Cover, error) {
+	if r.detail != nil {
+		return r.detail.Cover, nil
+	}
 	return nil, nil
+}
+func (r *fakeCoverRepo) GetDetail(ctx context.Context, id string) (*coverDomain.Detail, error) {
+	return r.detail, nil
 }
 func (r *fakeCoverRepo) FindByCode(ctx context.Context, code string) (*coverDomain.Cover, error) {
 	return nil, nil

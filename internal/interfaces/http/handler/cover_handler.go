@@ -93,11 +93,35 @@ func (h *CoverHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	officeID := middleware.GetOfficeIDFromCtx(r.Context())
-	if role != user.RoleAdmin && (officeID == nil || c.CurrentOfficeID != *officeID) {
-		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access cover for another office")
+	// A lender remains accountable for a cover after handover, so both the
+	// permanent owner and the current physical custodian may view it. Other
+	// offices must not learn the cover's identifier or lifecycle information.
+	if role != user.RoleAdmin && (officeID == nil || (c.CurrentOfficeID != *officeID && c.OwnerOfficeID != *officeID)) {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access cover outside owner/current office scope")
 		return
 	}
 	response.JSON(w, http.StatusOK, c)
+}
+
+// GetDetail returns the additive lifecycle projection for owner/current-office
+// users. The legacy GET endpoint remains a plain Cover response.
+func (h *CoverHandler) GetDetail(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	detail, err := h.svc.GetDetail(r.Context(), id)
+	if errors.Is(err, coverApp.ErrNotFound) {
+		response.Error(w, http.StatusNotFound, "NOT_FOUND", "cover not found")
+		return
+	}
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	role, officeID := middleware.GetRoleFromCtx(r.Context()), middleware.GetOfficeIDFromCtx(r.Context())
+	if !role.IsValid() || (role != user.RoleAdmin && (officeID == nil || (*officeID != detail.Cover.OwnerOfficeID && *officeID != detail.Cover.CurrentOfficeID))) {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cannot access cover outside owner/current office scope")
+		return
+	}
+	response.JSON(w, http.StatusOK, detail)
 }
 
 // Lookup handles GET /covers/lookup?code=.
