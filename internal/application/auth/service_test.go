@@ -77,6 +77,10 @@ func (m *mockTokenRepo) Revoke(ctx context.Context, id string) error {
 	return m.Called(ctx, id).Error(0)
 }
 
+func (m *mockTokenRepo) RevokeAllByUserID(ctx context.Context, userID string) error {
+	return m.Called(ctx, userID).Error(0)
+}
+
 func (m *mockTokenRepo) DeleteExpired(ctx context.Context) error {
 	return m.Called(ctx).Error(0)
 }

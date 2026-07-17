@@ -59,5 +59,6 @@ type RefreshTokenRepository interface {
 	FindByHash(ctx context.Context, hash string) (*RefreshToken, error)
 	Rotate(ctx context.Context, currentID string, replacement *RefreshToken, now time.Time) (bool, error)
 	Revoke(ctx context.Context, id string) error
+	RevokeAllByUserID(ctx context.Context, userID string) error
 	DeleteExpired(ctx context.Context) error
 }

@@ -24,6 +24,7 @@ type authenticationService interface {
 	Refresh(context.Context, string) (*auth.TokenPair, *domainUser.User, error)
 	Logout(context.Context, string) error
 	Me(context.Context, string) (*domainUser.User, error)
+	ChangePassword(context.Context, string, string, string) error
 }
 
 // NewAuthHandler creates a new AuthHandler.
@@ -42,6 +43,11 @@ type refreshRequest struct {
 
 type logoutRequest struct {
 	RefreshToken string `json:"refreshToken"`
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
 }
 
 // userResponse is the safe user representation returned to clients.
@@ -168,4 +174,23 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.JSON(w, http.StatusOK, toUserResponse(u))
+}
+
+// ChangePassword lets any authenticated active user replace only their own password.
+func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.GetUserIDFromCtx(r.Context())
+	var req changePasswordRequest
+	if userID == "" || decodeStrictJSON(w, r, &req) != nil || strings.TrimSpace(req.CurrentPassword) == "" || len(req.NewPassword) < 8 {
+		response.Error(w, http.StatusBadRequest, "VALIDATION", "current password and a new password of at least 8 characters are required")
+		return
+	}
+	if err := h.svc.ChangePassword(r.Context(), userID, req.CurrentPassword, req.NewPassword); err != nil {
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "current password is incorrect")
+			return
+		}
+		response.Error(w, http.StatusInternalServerError, "INTERNAL", "password change failed")
+		return
+	}
+	response.JSON(w, http.StatusOK, map[string]string{"message": "password changed; please sign in again"})
 }

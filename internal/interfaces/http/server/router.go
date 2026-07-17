@@ -53,6 +53,7 @@ func NewRouter(deps Dependencies) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(appMiddleware.Authenticator(deps.AuthSvc))
 				r.Get("/me", deps.AuthHandler.Me)
+				r.Post("/change-password", deps.AuthHandler.ChangePassword)
 			})
 		})
 
@@ -87,6 +88,7 @@ func NewRouter(deps Dependencies) http.Handler {
 				r.Post("/", deps.CoverHandler.Create)
 				r.Post("/batch", deps.CoverHandler.BatchCreate)
 				r.Get("/{id}", deps.CoverHandler.Get)
+				r.Get("/{id}/detail", deps.CoverHandler.GetDetail)
 				r.With(appMiddleware.RequireRole(user.RoleAdmin)).Post("/{id}/retire", deps.CoverHandler.Retire)
 			})
 

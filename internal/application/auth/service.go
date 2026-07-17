@@ -144,6 +144,36 @@ func (s *Service) Logout(ctx context.Context, rawToken string) error {
 	return s.tokenRepo.Revoke(ctx, rt.ID)
 }
 
+// ChangePassword verifies the current password and revokes all refresh
+// sessions, requiring a new login with the replacement password.
+func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, newPassword string) error {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(currentPassword) == "" || len(newPassword) < 8 {
+		return ErrInvalidCredentials
+	}
+	u, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil || u == nil || !u.IsActive {
+		if err != nil {
+			return err
+		}
+		return ErrInvalidCredentials
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(currentPassword)); err != nil {
+		return ErrInvalidCredentials
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+	if err != nil {
+		return fmt.Errorf("hash new password: %w", err)
+	}
+	u.PasswordHash, u.UpdatedAt = string(hash), time.Now().UTC()
+	if err := s.userRepo.Update(ctx, u); err != nil {
+		return err
+	}
+	if err := s.tokenRepo.RevokeAllByUserID(ctx, u.ID); err != nil {
+		return fmt.Errorf("revoke sessions: %w", err)
+	}
+	return nil
+}
+
 // Me returns the user for the given ID.
 func (s *Service) Me(ctx context.Context, userID string) (*user.User, error) {
 	u, err := s.userRepo.FindByID(ctx, userID)

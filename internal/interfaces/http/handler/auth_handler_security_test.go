@@ -18,12 +18,13 @@ import (
 )
 
 type stubAuthenticationService struct {
-	loginCalls int
-	usernames  []string
-	login      func(username, password string) (*auth.TokenPair, *user.User, error)
-	refresh    func(refreshToken string) (*auth.TokenPair, *user.User, error)
-	logout     func(refreshToken string) error
-	me         func(userID string) (*user.User, error)
+	loginCalls     int
+	usernames      []string
+	login          func(username, password string) (*auth.TokenPair, *user.User, error)
+	refresh        func(refreshToken string) (*auth.TokenPair, *user.User, error)
+	logout         func(refreshToken string) error
+	me             func(userID string) (*user.User, error)
+	changePassword func(userID, currentPassword, newPassword string) error
 }
 
 func (s *stubAuthenticationService) Login(_ context.Context, username, password string) (*auth.TokenPair, *user.User, error) {
@@ -48,6 +49,12 @@ func (s *stubAuthenticationService) Me(_ context.Context, userID string) (*user.
 		return nil, errors.New("unused")
 	}
 	return s.me(userID)
+}
+func (s *stubAuthenticationService) ChangePassword(_ context.Context, userID, currentPassword, newPassword string) error {
+	if s.changePassword == nil {
+		return errors.New("unused")
+	}
+	return s.changePassword(userID, currentPassword, newPassword)
 }
 
 func testLoginLimiterConfig() loginLimiterConfig {

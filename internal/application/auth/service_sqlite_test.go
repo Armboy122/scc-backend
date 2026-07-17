@@ -155,6 +155,10 @@ func (r *coordinatedRefreshTokenRepo) Revoke(ctx context.Context, id string) err
 	return r.base.Revoke(ctx, id)
 }
 
+func (r *coordinatedRefreshTokenRepo) RevokeAllByUserID(ctx context.Context, userID string) error {
+	return r.base.RevokeAllByUserID(ctx, userID)
+}
+
 func (r *coordinatedRefreshTokenRepo) DeleteExpired(ctx context.Context) error {
 	return r.base.DeleteExpired(ctx)
 }
