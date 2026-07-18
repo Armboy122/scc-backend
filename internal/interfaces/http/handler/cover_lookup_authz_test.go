@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCoverLookupRouteIsAdminOnlyAndDoesNotInvokeDiagnosticHandler(t *testing.T) {
+func TestCoverLookupRouteAllowsTechniciansButNotExecutives(t *testing.T) {
 	const secret = "cover-lookup-authz-test-secret"
 	officeID := "office-1"
 
@@ -24,8 +24,8 @@ func TestCoverLookupRouteIsAdminOnlyAndDoesNotInvokeDiagnosticHandler(t *testing
 		wantReached bool
 	}{
 		{name: "admin may use diagnostic", role: user.RoleAdmin, wantStatus: http.StatusNoContent, wantReached: true},
+		{name: "technician may inspect tag", role: user.RoleTech, wantStatus: http.StatusNoContent, wantReached: true},
 		{name: "exec is denied without metadata", role: user.RoleExec, wantStatus: http.StatusForbidden},
-		{name: "tech is denied without metadata", role: user.RoleTech, wantStatus: http.StatusForbidden},
 	}
 
 	for _, tt := range tests {
@@ -33,7 +33,7 @@ func TestCoverLookupRouteIsAdminOnlyAndDoesNotInvokeDiagnosticHandler(t *testing
 			var reached bool
 			router := chi.NewRouter()
 			router.Use(middleware.Authenticator(auth.NewService(nil, nil, secret, time.Minute, time.Hour)))
-			router.With(middleware.RequireRole(user.RoleAdmin)).Get("/covers/lookup", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			router.With(middleware.RequireRole(user.RoleAdmin, user.RoleTech)).Get("/covers/lookup", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				reached = true
 				w.WriteHeader(http.StatusNoContent)
 			}))

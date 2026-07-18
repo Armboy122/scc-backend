@@ -124,9 +124,9 @@ func (h *CoverHandler) GetDetail(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, detail)
 }
 
-// Lookup handles the administrator-only registry diagnostic
-// GET /covers/lookup?code=. Authorization is also applied at the route, but
-// this check keeps the handler safe if it is ever wired elsewhere.
+// Lookup handles the NFC registry diagnostic GET /covers/lookup?code=.
+// Administrators and technicians may inspect tag registrations; only an
+// administrator may later change an existing NFC identifier.
 func (h *CoverHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
 	if code == "" {
@@ -134,8 +134,9 @@ func (h *CoverHandler) Lookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if middleware.GetRoleFromCtx(r.Context()) != user.RoleAdmin {
-		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cover diagnostics require an admin role")
+	role := middleware.GetRoleFromCtx(r.Context())
+	if role != user.RoleAdmin && role != user.RoleTech {
+		response.Error(w, http.StatusForbidden, "FORBIDDEN", "cover diagnostics require an admin or technician role")
 		return
 	}
 
@@ -318,7 +319,10 @@ func resolveWritableOfficeID(r *http.Request, requested string) (string, bool) {
 	if !role.IsValid() {
 		return "", false
 	}
-	if role == user.RoleAdmin {
+	// Technicians are permitted to register NFC covers for any office, matching
+	// the NFC registration workflow available to administrators. They still
+	// cannot update an existing NFC identifier (the PATCH route is admin-only).
+	if role == user.RoleAdmin || role == user.RoleTech {
 		return requested, true
 	}
 
