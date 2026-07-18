@@ -509,6 +509,8 @@ func TestNotificationFailureDoesNotRollbackBorrowTruthAndOutboxRetries(t *testin
 	require.NoError(t, f.db.Where("borrow_id = ? AND type = ?", b.ID, string(notifDomain.TypeBorrowRequested)).First(&delivered).Error)
 	require.NotNil(t, delivered.DedupKey)
 	assert.Equal(t, f.lenderExec.ID, delivered.UserID)
+	assert.Contains(t, delivered.Message, "สำนักงาน Borrower")
+	assert.NotContains(t, delivered.Message, "office-borrower")
 }
 
 func TestConcurrentOutboxWorkersCreateOneNotification(t *testing.T) {

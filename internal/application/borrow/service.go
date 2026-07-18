@@ -181,9 +181,13 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*borrowDomain.Bor
 		}); err != nil {
 			return err
 		}
+		borrowerOfficeName, err := officeNameTx(ctx, tx, *p.Actor.OfficeID)
+		if err != nil {
+			return err
+		}
 		return enqueueLenderExecNotificationsTx(
 			ctx, tx, borrowID, lenderOfficeID, notifDomain.TypeBorrowRequested,
-			fmt.Sprintf("มีคำขอยืมฉนวน %d ชิ้นจากสำนักงาน %s", p.RequestedQty, *p.Actor.OfficeID),
+			fmt.Sprintf("มีคำขอยืมฉนวน %d ชิ้นจากสำนักงาน %s", p.RequestedQty, borrowerOfficeName),
 			"requested", now,
 		)
 	})
@@ -452,6 +456,17 @@ func ensureOfficeExistsTx(ctx context.Context, tx *gorm.DB, officeID string) err
 		return fmt.Errorf("lender office does not exist: %w", ErrValidation)
 	}
 	return nil
+}
+
+func officeNameTx(ctx context.Context, tx *gorm.DB, officeID string) (string, error) {
+	var name string
+	if err := tx.WithContext(ctx).Table("offices").Select("name").Where("id = ?", officeID).Scan(&name).Error; err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("office does not exist: %w", ErrValidation)
+	}
+	return name, nil
 }
 
 func actorCanRead(actor borrowDomain.Actor, borrowerOfficeID, lenderOfficeID string) bool {
