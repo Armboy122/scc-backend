@@ -2,10 +2,14 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/smartcover/backend/internal/application/auth"
 	domainUser "github.com/smartcover/backend/internal/domain/user"
@@ -18,6 +22,12 @@ type AuthHandler struct {
 	svc          authenticationService
 	loginLimiter *loginAttemptLimiter
 }
+
+const (
+	refreshCookieName = "scc_refresh"
+	csrfCookieName    = "scc_csrf"
+	refreshCookiePath = "/api/v1/auth"
+)
 
 type authenticationService interface {
 	Login(context.Context, string, string) (*auth.TokenPair, *domainUser.User, error)
@@ -36,14 +46,6 @@ func NewAuthHandler(svc *auth.Service) *AuthHandler {
 type loginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
-}
-
-type refreshRequest struct {
-	RefreshToken string `json:"refreshToken"`
-}
-
-type logoutRequest struct {
-	RefreshToken string `json:"refreshToken"`
 }
 
 type changePasswordRequest struct {
@@ -74,6 +76,56 @@ func toUserResponse(u *domainUser.User) userResponse {
 		OfficeID: u.OfficeID,
 		IsActive: u.IsActive,
 	}
+}
+
+func authCookieSecure(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func setRefreshCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: refreshCookieName, Value: token, Path: refreshCookiePath,
+		HttpOnly: true, Secure: authCookieSecure(r), SameSite: http.SameSiteStrictMode,
+		MaxAge: int((7 * 24 * time.Hour).Seconds()),
+	})
+}
+
+func setCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookieName, Value: token, Path: "/",
+		Secure: authCookieSecure(r), SameSite: http.SameSiteStrictMode,
+		MaxAge: int((7 * 24 * time.Hour).Seconds()),
+	})
+}
+
+func newCSRFToken() string {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		// crypto/rand failures are unrecoverable for a secure HTTP process.
+		panic("generate CSRF token: " + err.Error())
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes)
+}
+
+func clearAuthCookies(w http.ResponseWriter, r *http.Request) {
+	for _, cookie := range []http.Cookie{
+		{Name: refreshCookieName, Path: refreshCookiePath},
+		{Name: csrfCookieName, Path: "/"},
+	} {
+		cookie.HttpOnly = cookie.Name == refreshCookieName
+		cookie.Secure = authCookieSecure(r)
+		cookie.SameSite = http.SameSiteStrictMode
+		cookie.MaxAge = -1
+		http.SetCookie(w, &cookie)
+	}
+}
+
+func csrfValid(r *http.Request) bool {
+	cookie, err := r.Cookie(csrfCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(r.Header.Get("X-CSRF-Token"))) == 1
 }
 
 // Login handles POST /auth/login.
@@ -113,50 +165,63 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limiter.Reset(clientIP, normalizedUsername)
+	setRefreshCookie(w, r, pair.RefreshToken)
+	setCSRFCookie(w, r, newCSRFToken())
 
 	response.JSON(w, http.StatusOK, map[string]interface{}{
-		"accessToken":  pair.AccessToken,
-		"refreshToken": pair.RefreshToken,
-		"user":         toUserResponse(u),
+		"accessToken": pair.AccessToken,
+		"user":        toUserResponse(u),
 	})
 }
 
 // Refresh handles POST /auth/refresh.
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
-	var req refreshRequest
-	if err := decodeStrictJSON(w, r, &req); err != nil || req.RefreshToken == "" {
-		response.Error(w, http.StatusBadRequest, "VALIDATION", "refreshToken is required")
+	if !csrfValid(r) {
+		response.Error(w, http.StatusForbidden, "CSRF", "invalid CSRF token")
+		return
+	}
+	cookie, err := r.Cookie(refreshCookieName)
+	if err != nil || cookie.Value == "" {
+		response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "refresh cookie is required")
 		return
 	}
 
-	pair, u, err := h.svc.Refresh(r.Context(), req.RefreshToken)
+	pair, u, err := h.svc.Refresh(r.Context(), cookie.Value)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidToken) || errors.Is(err, auth.ErrUserInactive) {
+			clearAuthCookies(w, r)
 			response.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid or expired refresh token")
 			return
 		}
 		response.Error(w, http.StatusInternalServerError, "INTERNAL", "refresh failed")
 		return
 	}
+	setRefreshCookie(w, r, pair.RefreshToken)
+	setCSRFCookie(w, r, newCSRFToken())
 
 	response.JSON(w, http.StatusOK, map[string]interface{}{
-		"accessToken":  pair.AccessToken,
-		"refreshToken": pair.RefreshToken,
-		"user":         toUserResponse(u),
+		"accessToken": pair.AccessToken,
+		"user":        toUserResponse(u),
 	})
 }
 
 // Logout handles POST /auth/logout.
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	var req logoutRequest
-	if err := decodeStrictJSON(w, r, &req); err != nil || req.RefreshToken == "" {
-		response.Error(w, http.StatusBadRequest, "VALIDATION", "refreshToken is required")
+	if !csrfValid(r) {
+		response.Error(w, http.StatusForbidden, "CSRF", "invalid CSRF token")
 		return
 	}
-	if err := h.svc.Logout(r.Context(), req.RefreshToken); err != nil {
+	cookie, err := r.Cookie(refreshCookieName)
+	if err != nil || cookie.Value == "" {
+		clearAuthCookies(w, r)
+		response.NoContent(w)
+		return
+	}
+	if err := h.svc.Logout(r.Context(), cookie.Value); err != nil {
 		response.Error(w, http.StatusInternalServerError, "INTERNAL", "logout failed")
 		return
 	}
+	clearAuthCookies(w, r)
 	response.NoContent(w)
 }
 
