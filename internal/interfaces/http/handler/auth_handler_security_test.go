@@ -86,6 +86,49 @@ func performLogin(h *AuthHandler, username, password, forwardedFor string) *http
 	return recorder
 }
 
+func addAuthCookies(request *http.Request, refreshToken, csrfToken string) {
+	request.AddCookie(&http.Cookie{Name: refreshCookieName, Value: refreshToken})
+	request.AddCookie(&http.Cookie{Name: csrfCookieName, Value: csrfToken})
+	request.Header.Set("X-CSRF-Token", csrfToken)
+}
+
+func TestLoginReturnsOnlyAccessTokenAndIssuesSecureCookieSession(t *testing.T) {
+	service := &stubAuthenticationService{login: func(string, string) (*auth.TokenPair, *user.User, error) {
+		return &auth.TokenPair{AccessToken: "access-token", RefreshToken: "refresh-token"}, &user.User{
+			ID: "user-1", Name: "Tester", Username: "tester", Role: user.RoleTech, IsActive: true,
+		}, nil
+	}}
+	h := &AuthHandler{svc: service, loginLimiter: newLoginAttemptLimiter(testLoginLimiterConfig())}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"tester","password":"password"}`))
+	request.Header.Set("X-Forwarded-Proto", "https")
+	recorder := httptest.NewRecorder()
+
+	h.Login(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("login status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "refresh-token") || strings.Contains(recorder.Body.String(), "refreshToken") {
+		t.Fatalf("login response leaked refresh token: %s", recorder.Body.String())
+	}
+	cookies := recorder.Result().Cookies()
+	var refresh, csrf *http.Cookie
+	for _, cookie := range cookies {
+		switch cookie.Name {
+		case refreshCookieName:
+			refresh = cookie
+		case csrfCookieName:
+			csrf = cookie
+		}
+	}
+	if refresh == nil || refresh.Value != "refresh-token" || !refresh.HttpOnly || !refresh.Secure || refresh.SameSite != http.SameSiteStrictMode || refresh.Path != refreshCookiePath {
+		t.Fatalf("unsafe refresh cookie: %#v", refresh)
+	}
+	if csrf == nil || csrf.Value == "" || csrf.HttpOnly || !csrf.Secure || csrf.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("invalid CSRF cookie: %#v", csrf)
+	}
+}
+
 func TestLoginLimiterBlocksTargetedUsernameGuessingWithRetryAfter(t *testing.T) {
 	service := &stubAuthenticationService{login: func(string, string) (*auth.TokenPair, *user.User, error) {
 		return nil, nil, auth.ErrInvalidCredentials
@@ -267,8 +310,9 @@ func TestLogoutDoesNotReportSuccessWhenRevocationFails(t *testing.T) {
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/api/v1/auth/logout",
-		strings.NewReader(`{"refreshToken":"refresh-token"}`),
+		nil,
 	)
+	addAuthCookies(request, "refresh-token", "csrf-token")
 	recorder := httptest.NewRecorder()
 
 	h.Logout(recorder, request)
@@ -314,8 +358,9 @@ func TestPublicAuthEndpointsBoundAndClassifyFailures(t *testing.T) {
 		request := httptest.NewRequest(
 			http.MethodPost,
 			"/api/v1/auth/refresh",
-			strings.NewReader(`{"refreshToken":"refresh-token"}`),
+			nil,
 		)
+		addAuthCookies(request, "refresh-token", "csrf-token")
 		recorder := httptest.NewRecorder()
 
 		h.Refresh(recorder, request)
